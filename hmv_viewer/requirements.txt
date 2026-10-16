@@ -1,0 +1,2 @@
+# Keine Fremdpakete nötig - nur Python 3.9+ mit tkinter.
+# Nur zum Bauen einer .exe (optional): pyinstaller
