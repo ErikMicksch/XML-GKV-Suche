@@ -4,6 +4,7 @@ from __future__ import annotations
 import datetime as dt
 import difflib
 import queue
+import sys
 import threading
 import tkinter as tk
 import xml.etree.ElementTree as ET
@@ -32,8 +33,38 @@ TYPE_CHOICES = {
 }
 ALL_VERSIONS = "Alle Versionen"
 
+# Farben / Schrift
+FAMILY = "Segoe UI" if sys.platform == "win32" else "Helvetica"
+FONT = (FAMILY, 10)
+BOLD = (FAMILY, 10, "bold")
+BG = "#f3f5f8"
+SURFACE = "#ffffff"
+BORDER = "#d0d7de"
+TEXT = "#1f2328"
+MUTED = "#656d76"
+ACCENT = "#0b62c4"
+ZEBRA = "#f6f8fa"
+LINK = "#0b62c4"
+STAR = "★"
+
+SHORTCUTS = (
+    ("Strg+F", "Produktsuche"),
+    ("Strg+G", "Produktgruppen filtern"),
+    ("↓ in der Suche", "in die Trefferliste springen"),
+    ("Esc in der Suche", "Suche leeren"),
+    ("Strg+D", "Produkt als Favorit markieren / entfernen"),
+    ("Strg+B", "Favoriten anzeigen"),
+    ("Strg+C in der Liste", "Hilfsmittelnummer kopieren"),
+    ("Strg+Bild↑ / Bild↓", "vorherige / nächste Seite"),
+    ("Strg+I / Strg+E", "Import / Excel-Export"),
+    ("F5", "neu laden"),
+    ("Klick auf ★-Spalte", "Favorit umschalten"),
+    ("Rechtsklick Gruppe", "Gruppe als Favorit merken"),
+)
+
 PRODUCT_COLUMNS = (
     # id, Überschrift, Breite, Sortier-Schlüssel
+    ("fav", STAR, 34, "fav"),
     ("nummer", "Hilfsmittelnummer", 120, "nummer"),
     ("bezeichnung", "Bezeichnung", 330, "bezeichnung"),
     ("hersteller", "Hersteller", 210, "hersteller"),
@@ -51,6 +82,52 @@ def fmt_date(iso):
         return dt.date.fromisoformat(iso[:10]).strftime("%d.%m.%Y")
     except ValueError:
         return iso
+
+
+def _key_tuple(key):
+    return tuple(sorted(key.items()))
+
+
+def _make_text(parent):
+    text = tk.Text(parent, wrap="word", height=10, state="disabled", padx=12, pady=8, font=FONT,
+                   background=SURFACE, foreground=TEXT, relief="flat", borderwidth=0,
+                   highlightthickness=1, highlightbackground=BORDER, highlightcolor=BORDER)
+    _add_scrollbars(parent, text)
+    text.pack(side="left", fill="both", expand=True)
+    return text
+
+
+def _setup_style(root):
+    style = ttk.Style(root)
+    style.theme_use("clam")   # einheitlich auf allen Systemen und farblich anpassbar
+    root.configure(background=BG)
+    root.option_add("*Menu.font", FONT)
+    style.configure(".", background=BG, foreground=TEXT, font=FONT, bordercolor=BORDER,
+                    lightcolor=BG, darkcolor=BG, focuscolor=ACCENT)
+    style.configure("Header.TFrame", background=SURFACE)
+    style.configure("Header.TLabel", background=SURFACE, foreground=MUTED)
+    style.configure("Title.TLabel", background=SURFACE, foreground=TEXT, font=(FAMILY, 14, "bold"))
+    style.configure("Heading.TLabel", font=(FAMILY, 11, "bold"))
+    style.configure("Muted.TLabel", foreground=MUTED)
+    style.configure("Status.TLabel", background="#e8ecf1", foreground=MUTED, padding=(10, 4))
+    style.configure("TButton", padding=(10, 4), background="#eef1f5", lightcolor="#eef1f5", darkcolor="#eef1f5")
+    style.map("TButton", background=[("disabled", BG), ("active", "#e1e6ec")])
+    style.configure("Accent.TButton", background=ACCENT, foreground="white", bordercolor=ACCENT,
+                    lightcolor=ACCENT, darkcolor=ACCENT)
+    style.map("Accent.TButton", background=[("active", "#0950a0"), ("disabled", "#9bbce6")])
+    style.configure("Small.TButton", padding=(4, 1))
+    style.configure("TEntry", padding=(6, 4), fieldbackground=SURFACE)
+    style.configure("TCombobox", padding=(6, 3), fieldbackground=SURFACE)
+    style.map("TCombobox", fieldbackground=[("readonly", SURFACE)], selectbackground=[("readonly", SURFACE)],
+              selectforeground=[("readonly", TEXT)])
+    style.configure("Treeview", rowheight=26, background=SURFACE, fieldbackground=SURFACE, bordercolor=BORDER)
+    style.map("Treeview", background=[("selected", ACCENT)], foreground=[("selected", "white")])
+    style.configure("Treeview.Heading", font=BOLD, background="#e8ecf1", relief="flat", padding=(6, 4))
+    style.map("Treeview.Heading", background=[("active", "#dce2e9")])
+    style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(4, 4, 0, 0))
+    style.configure("TNotebook.Tab", padding=(14, 5), background="#e3e8ee", lightcolor="#e3e8ee")
+    style.map("TNotebook.Tab", background=[("selected", SURFACE)], foreground=[("selected", ACCENT)],
+              lightcolor=[("selected", SURFACE)])
 
 
 def _add_scrollbars(parent, widget, horizontal=False):
@@ -138,7 +215,7 @@ class ExportDialog(tk.Toplevel):
         buttons = ttk.Frame(frame)
         buttons.pack(fill="x", pady=(16, 0))
         ttk.Button(buttons, text="Abbrechen", command=self.destroy).pack(side="right")
-        ttk.Button(buttons, text="Exportieren …", command=self._go).pack(side="right", padx=(0, 8))
+        ttk.Button(buttons, text="Exportieren …", style="Accent.TButton", command=self._go).pack(side="right", padx=(0, 8))
         self.grab_set()
 
     def _go(self):
@@ -175,52 +252,96 @@ class App(tk.Tk):
         self.tree_keys = {}
         self._hist_rows = {}
         self._current_nummer = None
+        self._current_keys = {}
         self._version_change_rows = {}
+        self._hier_job = None
+        self._hier_data = []
+        self._node_by_key = {}
+        self.favs = set()
 
-        style = ttk.Style(self)
-        style.configure("Treeview", rowheight=22)
-        style.configure("Heading.TLabel", font=("", 10, "bold"))
-
+        _setup_style(self)
         self._build_toolbar()
+        status = ttk.Frame(self, style="Status.TLabel")
+        status.pack(fill="x", side="bottom")
+        self.status = tk.StringVar(value="")
+        ttk.Label(status, textvariable=self.status, style="Status.TLabel").pack(side="left")
+        ttk.Label(status, text=f"Datenbank: {self.db_path}", style="Status.TLabel").pack(side="right")
+
         self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill="both", expand=True, padx=6, pady=(0, 6))
-        self.tab_products = ttk.Frame(self.notebook)
-        self.tab_versions = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_products, text="  Produkte  ")
-        self.notebook.add(self.tab_versions, text="  Versionen & Änderungen  ")
+        self.notebook.pack(fill="both", expand=True, padx=8, pady=(4, 6))
+        self.tab_products = ttk.Frame(self.notebook, padding=(4, 6, 4, 4))
+        self.tab_versions = ttk.Frame(self.notebook, padding=(4, 6, 4, 4))
+        self.notebook.add(self.tab_products, text="Produkte")
+        self.notebook.add(self.tab_versions, text="Versionen & Änderungen")
         self._build_products_tab()
         self._build_versions_tab()
-
-        self.status = tk.StringVar(value="")
-        ttk.Label(self, textvariable=self.status, relief="sunken", anchor="w", padding=(6, 2)).pack(fill="x", side="bottom")
-
-        self.bind("<Control-f>", lambda e: (self.notebook.select(self.tab_products), self.search_entry.focus_set()))
+        self._bind_shortcuts()
         self.reload_all()
         if not queries.list_versions(self.conn):
             self.after(300, self._offer_first_import)
 
     # ------------------------------------------------------------------ Aufbau
     def _build_toolbar(self):
-        bar = ttk.Frame(self, padding=(6, 6))
+        bar = ttk.Frame(self, padding=(12, 8), style="Header.TFrame")
         bar.pack(fill="x")
-        ttk.Button(bar, text="📥  XML / ZIP importieren …", command=self.start_import).pack(side="left")
+        ttk.Label(bar, text="HMV-Viewer", style="Title.TLabel").pack(side="left")
+        ttk.Label(bar, text=f"Hilfsmittelverzeichnis · v{__version__}", style="Header.TLabel").pack(side="left", padx=(8, 24))
+        ttk.Button(bar, text="📥  XML / ZIP importieren …", style="Accent.TButton", command=self.start_import).pack(side="left")
         ttk.Button(bar, text="📊  Nach Excel exportieren …", command=self.start_export).pack(side="left", padx=6)
-        ttk.Label(bar, text=f"Datenbank: {self.db_path}", foreground="#666").pack(side="right")
+        ttk.Button(bar, text=f"{STAR}  Favoriten", command=self.show_favorites).pack(side="left")
+        ttk.Button(bar, text="⌨  Tastenkürzel", command=self._show_shortcuts).pack(side="right")
+
+    def _bind_shortcuts(self):
+        def search(_e):
+            self.notebook.select(self.tab_products)
+            self.search_entry.focus_set()
+            self.search_entry.select_range(0, "end")
+            return "break"
+
+        def hier(_e):
+            self.notebook.select(self.tab_products)
+            self.hier_entry.focus_set()
+            return "break"
+
+        for seq, fn in (("<Control-f>", search), ("<Control-g>", hier),
+                        ("<Control-d>", lambda e: self._toggle_selected_fav()),
+                        ("<Control-b>", lambda e: self.show_favorites()),
+                        ("<Control-i>", lambda e: self.start_import()),
+                        ("<Control-e>", lambda e: self.start_export()),
+                        ("<Control-Prior>", lambda e: self.btn_prev.instate(["!disabled"]) and self._goto_page(self.page - 1)),
+                        ("<Control-Next>", lambda e: self.btn_next.instate(["!disabled"]) and self._goto_page(self.page + 1)),
+                        ("<F5>", lambda e: self.reload_all())):
+            self.bind(seq, fn)
+
+    def _show_shortcuts(self):
+        width = max(len(k) for k, _ in SHORTCUTS)
+        messagebox.showinfo("Tastenkürzel", "\n".join(f"{k.ljust(width)}   {v}" for k, v in SHORTCUTS))
 
     def _build_products_tab(self):
         paned = ttk.PanedWindow(self.tab_products, orient="horizontal")
         paned.pack(fill="both", expand=True)
 
         # --- links: Hierarchie
-        left = ttk.Frame(paned)
-        ttk.Label(left, text="Hierarchie", style="Heading.TLabel").pack(anchor="w", padx=4, pady=(4, 2))
+        left = ttk.Frame(paned, padding=(0, 0, 6, 0))
+        ttk.Label(left, text="Produktgruppen", style="Heading.TLabel").pack(anchor="w", pady=(2, 4))
+        self.var_hier = tk.StringVar()
+        self.hier_entry = ttk.Entry(left, textvariable=self.var_hier)
+        self.hier_entry.pack(fill="x")
+        self.var_hier.trace_add("write", lambda *a: self._schedule_hier())
+        self.hier_entry.bind("<Escape>", lambda e: self.var_hier.set(""))
+        ttk.Label(left, text="Name oder Nummer filtern, z. B. „rollator“ oder „10.50“",
+                  style="Muted.TLabel").pack(anchor="w", pady=(2, 6))
         holder = ttk.Frame(left)
         holder.pack(fill="both", expand=True)
         self.hier = ttk.Treeview(holder, show="tree", selectmode="browse")
         _add_scrollbars(holder, self.hier, horizontal=True)
         self.hier.pack(side="left", fill="both", expand=True)
         self.hier.column("#0", width=380, stretch=False)
+        self.hier.tag_configure("fav", foreground="#9a6700", font=BOLD)
         self.hier.bind("<<TreeviewSelect>>", self._on_hier_select)
+        self.hier_menu = tk.Menu(self, tearoff=0)
+        self.hier.bind("<Button-3>", self._hier_popup)
+        self.hier.bind("<Button-2>", self._hier_popup)
         paned.add(left, weight=1)
 
         # --- rechts
@@ -237,17 +358,24 @@ class App(tk.Tk):
         self._build_detail(bottom)
 
     def _build_filter_bar(self, parent):
-        bar = ttk.Frame(parent, padding=(4, 4))
+        bar = ttk.Frame(parent, padding=(4, 2, 4, 4))
         bar.pack(fill="x")
-        ttk.Label(bar, text="Suche:").pack(side="left")
+        ttk.Label(bar, text="🔍", font=(FAMILY, 12)).pack(side="left")
         self.var_text = tk.StringVar()
-        self.search_entry = ttk.Entry(bar, textvariable=self.var_text, width=34)
-        self.search_entry.pack(side="left", padx=(4, 4))
+        self.search_entry = ttk.Entry(bar, textvariable=self.var_text, width=44, font=(FAMILY, 11))
+        self.search_entry.pack(side="left", padx=(4, 2))
         self.var_text.trace_add("write", lambda *a: self._schedule_filter())
         self.search_entry.bind("<Return>", lambda e: self.apply_filter())
+        self.search_entry.bind("<Escape>", lambda e: self.var_text.set(""))
+        self.search_entry.bind("<Down>", lambda e: self._focus_list())
+        ttk.Button(bar, text="✕", width=3, style="Small.TButton", command=lambda: self.var_text.set("")).pack(side="left")
         self.var_merk = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bar, text="auch in Merkmalen", variable=self.var_merk, command=self.apply_filter).pack(side="left", padx=(0, 10))
+        ttk.Checkbutton(bar, text="auch in Merkmalen suchen", variable=self.var_merk, command=self.apply_filter).pack(side="left", padx=(10, 0))
+        ttk.Label(bar, text="Bezeichnung, Hersteller oder Nummer (01.24.01 = Präfix) · Strg+F",
+                  style="Muted.TLabel").pack(side="left", padx=(12, 0))
 
+        bar = ttk.Frame(parent, padding=(4, 0, 4, 4))
+        bar.pack(fill="x")
         ttk.Label(bar, text="Status:").pack(side="left")
         self.var_status = tk.StringVar(value="Nur aktive")
         cb = ttk.Combobox(bar, textvariable=self.var_status, values=list(STATUS_CHOICES), state="readonly", width=13)
@@ -264,13 +392,14 @@ class App(tk.Tk):
         cb.pack(side="left", padx=(0, 10))
         cb.bind("<<ComboboxSelected>>", lambda e: self.apply_filter())
 
-        ttk.Button(bar, text="Zurücksetzen", command=self.reset_filter).pack(side="left")
+        ttk.Button(bar, text="Filter zurücksetzen", command=self.reset_filter).pack(side="left")
 
-        legend = ttk.Frame(parent, padding=(6, 0))
-        legend.pack(fill="x")
-        ttk.Label(legend, text="Markierung der letzten Version:").pack(side="left")
+        legend = ttk.Frame(bar)
+        legend.pack(side="right")
+        ttk.Label(legend, text="Letzte Version:", style="Muted.TLabel").pack(side="left")
         for ctype in (NEU, GEAENDERT, REAKTIVIERT, ENTFERNT):
-            tk.Label(legend, text=f" {CHANGE_LABELS[ctype]} ", bg=TAG_COLORS[ctype], padx=4).pack(side="left", padx=3)
+            tk.Label(legend, text=CHANGE_LABELS[ctype], bg=TAG_COLORS[ctype], fg=TEXT, font=(FAMILY, 9),
+                     padx=6, pady=1).pack(side="left", padx=(4, 0))
 
     def _build_product_list(self, parent):
         holder = ttk.Frame(parent)
@@ -280,40 +409,61 @@ class App(tk.Tk):
         self.products.pack(side="left", fill="both", expand=True)
         for cid, title, width, _ in PRODUCT_COLUMNS:
             self.products.heading(cid, text=title, command=lambda c=cid: self._sort_by(c))
-            self.products.column(cid, width=width, minwidth=60, stretch=(cid == "bezeichnung"))
+            self.products.column(cid, width=width, minwidth=34 if cid == "fav" else 60,
+                                 stretch=(cid == "bezeichnung"), anchor="center" if cid == "fav" else "w")
+        self.products.tag_configure("odd", background=ZEBRA)
         for ctype, color in TAG_COLORS.items():
             self.products.tag_configure(ctype, background=color)
         self.products.bind("<<TreeviewSelect>>", self._on_product_select)
+        self.products.bind("<Button-1>", self._on_product_click, add="+")
+        self.products.bind("<Control-c>", lambda e: self._copy(True))
         self.menu = tk.Menu(self, tearoff=0)
+        self.menu.add_command(label=f"{STAR}  Favorit an/aus  (Strg+D)", command=self._toggle_selected_fav)
+        self.menu.add_separator()
         self.menu.add_command(label="Hilfsmittelnummer kopieren (01.24.01.0002)", command=lambda: self._copy(True))
         self.menu.add_command(label="Hilfsmittelnummer kopieren (0124010002)", command=lambda: self._copy(False))
+        self.menu.add_command(label="Nummer + Bezeichnung kopieren", command=lambda: self._copy(True, with_name=True))
+        self.menu.add_separator()
+        self.menu.add_command(label="Produktart in der Hierarchie zeigen", command=lambda: self._reveal_level("art"))
         self.products.bind("<Button-3>", self._popup)
         self.products.bind("<Button-2>", self._popup)
 
         pager = ttk.Frame(parent, padding=(4, 0, 4, 4))
-        pager.pack(fill="x")
+        pager.pack(fill="x", side="bottom", before=holder)   # vor der Liste packen, sonst wird er abgeschnitten
         self.btn_prev = ttk.Button(pager, text="◀ Zurück", command=lambda: self._goto_page(self.page - 1))
         self.btn_prev.pack(side="left")
         self.btn_next = ttk.Button(pager, text="Weiter ▶", command=lambda: self._goto_page(self.page + 1))
         self.btn_next.pack(side="left", padx=6)
-        self.pager_label = ttk.Label(pager, text="")
+        self.pager_label = ttk.Label(pager, text="", style="Muted.TLabel")
         self.pager_label.pack(side="left", padx=8)
 
     def _build_detail(self, parent):
+        actions = ttk.Frame(parent, padding=(4, 4, 4, 0))
+        actions.pack(fill="x")
+        self.btn_fav = ttk.Button(actions, text=f"☆  Als Favorit merken", command=self._toggle_selected_fav)
+        self.btn_fav.pack(side="left")
+        self.btn_copy = ttk.Button(actions, text="Nummer kopieren", command=lambda: self._copy(True))
+        self.btn_copy.pack(side="left", padx=6)
+        ttk.Label(actions, text="Gruppe/Art im Detail anklicken = dorthin springen",
+                  style="Muted.TLabel").pack(side="right")
+
         nb = ttk.Notebook(parent)
-        nb.pack(fill="both", expand=True, padx=4, pady=(0, 4))
+        nb.pack(fill="both", expand=True, padx=4, pady=(4, 4))
         self.detail_nb = nb
 
         f_det = ttk.Frame(nb)
-        nb.add(f_det, text=" Details ")
-        self.detail_text = tk.Text(f_det, wrap="word", height=10, state="disabled", padx=8, pady=6)
-        _add_scrollbars(f_det, self.detail_text)
-        self.detail_text.pack(side="left", fill="both", expand=True)
-        self.detail_text.tag_configure("title", font=("", 12, "bold"))
-        self.detail_text.tag_configure("label", font=("", 9, "bold"), foreground="#444")
+        nb.add(f_det, text="Details")
+        self.detail_text = _make_text(f_det)
+        self.detail_text.tag_configure("title", font=(FAMILY, 13, "bold"), spacing3=6)
+        self.detail_text.tag_configure("label", font=BOLD, foreground=MUTED)
+        self.detail_text.tag_configure("link", foreground=LINK, underline=True)
+        self.detail_text.tag_bind("link", "<Enter>", lambda e: self.detail_text.configure(cursor="hand2"))
+        self.detail_text.tag_bind("link", "<Leave>", lambda e: self.detail_text.configure(cursor=""))
+        for level in ("gruppe", "ort", "untergruppe", "art"):
+            self.detail_text.tag_bind(f"link_{level}", "<Button-1>", lambda e, l=level: self._reveal_level(l))
 
         f_hist = ttk.Frame(nb)
-        nb.add(f_hist, text=" Historie ")
+        nb.add(f_hist, text="Historie")
         hp = ttk.PanedWindow(f_hist, orient="horizontal")
         hp.pack(fill="both", expand=True)
         lf = ttk.Frame(hp)
@@ -329,19 +479,17 @@ class App(tk.Tk):
         self.hist_tree.bind("<<TreeviewSelect>>", self._on_hist_select)
         rf = ttk.Frame(hp)
         hp.add(rf, weight=3)
-        self.hist_text = tk.Text(rf, wrap="word", height=10, state="disabled", padx=8, pady=6)
-        _add_scrollbars(rf, self.hist_text)
-        self.hist_text.pack(side="left", fill="both", expand=True)
+        self.hist_text = _make_text(rf)
         self._configure_diff_tags(self.hist_text)
 
     @staticmethod
     def _configure_diff_tags(text):
-        text.tag_configure("head", font=("", 10, "bold"))
-        text.tag_configure("field", font=("", 10, "bold"), foreground="#1f4e78", spacing1=8)
+        text.tag_configure("head", font=(FAMILY, 11, "bold"))
+        text.tag_configure("field", font=BOLD, foreground="#1f4e78", spacing1=8)
         text.tag_configure("add", background="#e6ffed")
         text.tag_configure("del", background="#ffeef0")
         text.tag_configure("hunk", foreground="#888")
-        text.tag_configure("muted", foreground="#666")
+        text.tag_configure("muted", foreground=MUTED)
 
     def _build_versions_tab(self):
         paned = ttk.PanedWindow(self.tab_versions, orient="vertical")
@@ -375,8 +523,10 @@ class App(tk.Tk):
         cb.pack(side="left", padx=10)
         cb.bind("<<ComboboxSelected>>", lambda e: self._load_version_changes())
         ttk.Button(bar, text="In Produktliste anzeigen", command=self._show_version_in_products).pack(side="left")
-        self.ver_note = ttk.Label(bar, text="", foreground="#666")
+        self.ver_note = ttk.Label(bar, text="", style="Muted.TLabel")
         self.ver_note.pack(side="left", padx=10)
+        ttk.Label(bar, text="Doppelklick auf ein Produkt öffnet es in der Produktliste",
+                  style="Muted.TLabel").pack(side="right")
 
         cols = (("typ", "Änderung", 120), ("ebene", "Ebene", 110), ("nummer", "Nummer", 120),
                 ("name", "Bezeichnung", 480), ("felder", "Geänderte Felder", 280))
@@ -403,31 +553,171 @@ class App(tk.Tk):
         self.cb_version.configure(values=[ALL_VERSIONS] + labels)
         if self.var_version.get() not in self.version_by_label:
             self.var_version.set(ALL_VERSIONS)
+        self._hier_data = queries.hierarchy_tree(self.conn)
+        self._node_by_key = {}
+
+        def index(nodes):
+            for n in nodes:
+                self._node_by_key[_key_tuple(n["key"])] = n
+                index(n["children"])
+
+        index(self._hier_data)
         self._load_hierarchy()
         self._read_filter()
         self.page = 0
         self.refresh_list()
         self._load_versions()
 
+    def _schedule_hier(self):
+        if self._hier_job is not None:
+            self.after_cancel(self._hier_job)
+        self._hier_job = self.after(250, self._load_hierarchy)
+
+    @staticmethod
+    def _prune(nodes, term):
+        """Behält passende Knoten (mit allen Kindern) und die Pfade dorthin (aufgeklappt)."""
+        out = []
+        for n in nodes:
+            if term in n["label"].casefold():
+                out.append(n)
+            else:
+                kids = App._prune(n["children"], term)
+                if kids:
+                    out.append(dict(n, children=kids, open=True))
+        return out
+
     def _load_hierarchy(self):
+        if self._hier_job is not None:
+            self.after_cancel(self._hier_job)
+            self._hier_job = None
+        sel = self.hier.selection()
+        prev = self.tree_keys.get(sel[0]) if sel else None
+        term = self.var_hier.get().strip().casefold()
+        nodes = self._prune(self._hier_data, term) if term else self._hier_data
         self._building = True
         try:
             self.hier.delete(*self.hier.get_children())
             self.tree_keys = {}
+            self.hier.insert("", "end", iid="fav", text=STAR, open=True, tags=("fav",))
             total = queries.count_products(self.conn, ProductFilter(status="aktiv"))
-            root = self.hier.insert("", "end", text=f"Alle Produkte ({total:,})".replace(",", "."), open=True)
+            root = self.hier.insert("", "end", iid="all", text=f"Alle Produkte ({total:,})".replace(",", "."), open=True)
             self.tree_keys[root] = {}
 
-            def add(parent, nodes, depth):
+            def add(parent, nodes):
                 for n in nodes:
-                    iid = self.hier.insert(parent, "end", text=f"{n['label']}  ({n['count']})")
+                    iid = self.hier.insert(parent, "end", text=f"{n['label']}  ({n['count']})", open=n.get("open", False))
                     self.tree_keys[iid] = n["key"]
-                    add(iid, n["children"], depth + 1)
+                    add(iid, n["children"])
 
-            add(root, queries.hierarchy_tree(self.conn), 1)
-            self.hier.selection_set(root)
+            add(root, nodes)
+            self._fill_favorites()
+            target = self._iid_for_key(prev) if prev is not None else None
+            self.hier.selection_set(target or root)
+            self.hier.see(target or root)
         finally:
             self._building = False
+
+    def _fill_favorites(self):
+        """Knoten „★ Favoriten“: alle Favoriten-Produkte, darunter die gemerkten Gruppen/Arten."""
+        self.favs = queries.favorites(self.conn)
+        n_products = sum(len(k) == 10 for k in self.favs)
+        self.hier.delete(*self.hier.get_children("fav"))
+        self.hier.item("fav", text=f"{STAR} Favoriten  ({n_products} Produkte)")
+        self.tree_keys["fav"] = {"favoriten": True}
+        for k in sorted(k for k in self.favs if len(k) < 10):
+            key = queries.key_from_prefix(k)
+            node = self._node_by_key.get(_key_tuple(key))
+            iid = f"fav:{k}"
+            self.hier.insert("fav", "end", iid=iid, text=f"{node['label']}  ({node['count']})" if node else k)
+            self.tree_keys[iid] = key
+
+    def _iid_for_key(self, key):
+        if key.get("favoriten"):
+            return "fav"
+        return next((i for i, k in self.tree_keys.items() if k == key and not i.startswith("fav")), None)
+
+    def _hier_popup(self, event):
+        iid = self.hier.identify_row(event.y)
+        key = self.tree_keys.get(iid)
+        if not key or key.get("favoriten"):
+            return
+        self.hier.selection_set(iid)
+        k = queries.favorite_key(key)
+        self.hier_menu.delete(0, "end")
+        self.hier_menu.add_command(
+            label=f"{STAR}  Aus Favoriten entfernen" if k in self.favs else "☆  Als Favorit merken",
+            command=lambda: self._toggle_fav(k))
+        self.hier_menu.tk_popup(event.x_root, event.y_root)
+
+    def show_favorites(self):
+        self.notebook.select(self.tab_products)
+        self.hier.selection_set("fav")
+        self.hier.see("fav")
+        self.apply_filter()
+
+    def _toggle_selected_fav(self):
+        sel = self.products.selection()
+        if sel:
+            self._toggle_fav(sel[0])
+
+    def _toggle_fav(self, k):
+        added = queries.toggle_favorite(self.conn, k)
+        self._fill_favorites()
+        if len(k) == 10:
+            if self.filter.favoriten and not added:
+                self.refresh_list()
+            elif self.products.exists(k):
+                self.products.set(k, "fav", STAR if added else "")
+            if k == self._current_nummer:
+                self._show_detail(k)
+            name = format_nummer(k)
+        else:
+            node = self._node_by_key.get(_key_tuple(queries.key_from_prefix(k)))
+            name = node["label"] if node else k
+        self.status.set(f"{name} {'als Favorit gemerkt' if added else 'aus den Favoriten entfernt'}")
+
+    def _update_fav_button(self):
+        if not self._current_nummer:
+            self.btn_fav.configure(text="☆  Als Favorit merken")
+            self.btn_fav.state(["disabled"])
+            self.btn_copy.state(["disabled"])
+            return
+        self.btn_fav.state(["!disabled"])
+        self.btn_copy.state(["!disabled"])
+        is_fav = self._current_nummer in self.favs
+        self.btn_fav.configure(text=f"{STAR}  Favorit entfernen" if is_fav else "☆  Als Favorit merken")
+
+    def _reveal_level(self, level):
+        """Springt im Hierarchiebaum zur Gruppe/Ort/Untergruppe/Art des gewählten Produkts."""
+        key = self._current_keys.get(level)
+        if key is None:
+            return
+        iid = self._iid_for_key(key)
+        if iid is None and self.var_hier.get():
+            self.var_hier.set("")
+            self._load_hierarchy()
+            iid = self._iid_for_key(key)
+        if iid is None:
+            return
+        self.notebook.select(self.tab_products)
+        self.var_text.set("")
+        self.hier.selection_set(iid)
+        self.hier.see(iid)
+        self.apply_filter()
+
+    def _focus_list(self):
+        kids = self.products.get_children()
+        if kids:
+            self.products.focus_set()
+            self.products.focus(kids[0])
+            self.products.selection_set(kids[0])
+        return "break"
+
+    def _on_product_click(self, event):
+        if self.products.identify_column(event.x) == "#1":   # ★-Spalte
+            iid = self.products.identify_row(event.y)
+            if iid:
+                self._toggle_fav(iid)
 
     def _read_filter(self):
         key = {}
@@ -443,6 +733,7 @@ class App(tk.Tk):
             untergruppe=key.get("untergruppe"), art=key.get("art"),
             import_id=version_id,
             change_type=TYPE_CHOICES.get(self.var_type.get()),
+            favoriten=bool(key.get("favoriten")),
         )
 
     def apply_filter(self):
@@ -464,9 +755,12 @@ class App(tk.Tk):
         self.var_status.set("Nur aktive")
         self.var_version.set(ALL_VERSIONS)
         self.var_type.set("Alle Änderungstypen")
-        children = self.hier.get_children()
-        if children:
-            self.hier.selection_set(children[0])
+        if self.var_hier.get():
+            self.var_hier.set("")
+            self._load_hierarchy()
+        if self.hier.exists("all"):
+            self.hier.selection_set("all")
+            self.hier.see("all")
         self.apply_filter()
 
     def _on_hier_select(self, _event):
@@ -475,7 +769,7 @@ class App(tk.Tk):
 
     def _sort_by(self, cid):
         key = next(c[3] for c in PRODUCT_COLUMNS if c[0] == cid)
-        self.desc = (not self.desc) if self.order == key else False
+        self.desc = (not self.desc) if self.order == key else (key == "fav")   # Favoriten zuerst
         self.order = key
         self.page = 0
         self.refresh_list()
@@ -510,10 +804,11 @@ class App(tk.Tk):
         rows = queries.fetch_products(self.conn, self.filter, self.order, self.desc,
                                       limit=PAGE_SIZE, offset=self.page * PAGE_SIZE)
         self.products.delete(*self.products.get_children())
-        for p in rows:
+        for i, p in enumerate(rows):
             art = self.names.path(p)["art"]
-            tag = self._row_tag(p)
+            tag = self._row_tag(p) or ("odd" if i % 2 else None)
             self.products.insert("", "end", iid=p["nummer"], tags=(tag,) if tag else (), values=(
+                STAR if p["nummer"] in self.favs else "",
                 format_nummer(p["nummer"]), p["bezeichnung"] or "", p["hersteller"] or "", art,
                 fmt_date(p["aufnahmedatum"]), fmt_date(p["aenderungsdatum"]), self._status_text(p)))
         for cid, _, _, key in PRODUCT_COLUMNS:
@@ -526,7 +821,13 @@ class App(tk.Tk):
             text=f"{self.total:,} Treffer  ·  Zeilen {first:,}–{last:,}  ·  Seite {self.page + 1}/{pages}".replace(",", "."))
         self.btn_prev.state(["!disabled"] if self.page > 0 else ["disabled"])
         self.btn_next.state(["!disabled"] if self.page + 1 < pages else ["disabled"])
-        self.status.set(f"{self.total:,} Produkte in der aktuellen Auswahl".replace(",", "."))
+        summary = [f"{self.total:,} Produkte".replace(",", ".")]
+        sel = self.hier.selection()
+        if sel and sel[0] != "all":
+            summary.append(f"Bereich: {self.hier.item(sel[0], 'text')}")
+        if self.filter.text:
+            summary.append(f"Suche: „{self.filter.text}“")
+        self.status.set("  ·  ".join(summary))
         self._show_detail(None)
 
     # ------------------------------------------------------------------ Details
@@ -538,14 +839,16 @@ class App(tk.Tk):
         widget.configure(state="normal")
         widget.delete("1.0", "end")
         for text, tag in parts:
-            widget.insert("end", text, (tag,) if tag else ())
+            widget.insert("end", text, tag if isinstance(tag, tuple) else (tag,) if tag else ())
         widget.configure(state="disabled")
 
     def _show_detail(self, nummer):
         self._current_nummer = nummer
+        self._current_keys = {}
         self.hist_tree.delete(*self.hist_tree.get_children())
         self._hist_rows = {}
         self._set_text(self.hist_text, [])
+        self._update_fav_button()
         if not nummer:
             self._set_text(self.detail_text, [("Produkt in der Liste auswählen, um Details und Historie zu sehen.", "label")])
             return
@@ -554,14 +857,22 @@ class App(tk.Tk):
             return
         path = self.names.path(p)
         status = self._status_text(p)
+        g, o, u, a = p["gruppe"], p["ort"], p["untergruppe"], p["art"]
+        self._current_keys = {
+            "gruppe": {"gruppe": g},
+            "ort": {"gruppe": g, "ort": o},
+            "untergruppe": {"gruppe": g, "ort": o, "untergruppe": u},
+            "art": {"gruppe": g, "ort": o, "untergruppe": u, "art": a},
+        }
+        star = f"{STAR} " if nummer in self.favs else ""
         parts = [
-            (f"{p['bezeichnung'] or '(ohne Bezeichnung)'}\n", "title"),
+            (f"{star}{p['bezeichnung'] or '(ohne Bezeichnung)'}\n", "title"),
             ("Hilfsmittelnummer: ", "label"), (f"{format_nummer(p['nummer'])}   (10-stellig: {p['nummer']})\n", None),
             ("Hersteller: ", "label"), (f"{p['hersteller'] or ''}\n", None),
-            ("Produktgruppe: ", "label"), (f"{path['gruppe']}\n", None),
-            ("Anwendungsort: ", "label"), (f"{path['ort']}\n", None),
-            ("Untergruppe: ", "label"), (f"{path['untergruppe']}\n", None),
-            ("Produktart: ", "label"), (f"{path['art']}\n", None),
+            ("Produktgruppe: ", "label"), (path["gruppe"], ("link", "link_gruppe")), ("\n", None),
+            ("Anwendungsort: ", "label"), (path["ort"], ("link", "link_ort")), ("\n", None),
+            ("Untergruppe: ", "label"), (path["untergruppe"], ("link", "link_untergruppe")), ("\n", None),
+            ("Produktart: ", "label"), (path["art"], ("link", "link_art")), ("\n", None),
             ("Aufnahme: ", "label"), (f"{fmt_date(p['aufnahmedatum'])}", None),
             ("    Änderung (HMV): ", "label"), (f"{fmt_date(p['aenderungsdatum']) or '–'}\n", None),
             ("Status im Bestand: ", "label"), (f"{'aktiv' if p['active'] else 'entfernt'}  ·  {status}\n\n", None),
@@ -626,11 +937,15 @@ class App(tk.Tk):
             self.products.selection_set(item)
             self.menu.tk_popup(event.x_root, event.y_root)
 
-    def _copy(self, formatted):
+    def _copy(self, formatted, with_name=False):
         sel = self.products.selection()
         if sel:
+            text = format_nummer(sel[0]) if formatted else sel[0]
+            if with_name:
+                text += "\t" + self.products.set(sel[0], "bezeichnung")
             self.clipboard_clear()
-            self.clipboard_append(format_nummer(sel[0]) if formatted else sel[0])
+            self.clipboard_append(text)
+            self.status.set(f"Kopiert: {text}")
 
     # ------------------------------------------------------------------ Versionen-Tab
     def _load_versions(self):

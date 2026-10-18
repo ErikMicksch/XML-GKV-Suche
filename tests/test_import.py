@@ -90,6 +90,17 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(text="0124010003")), 1)
         self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(text="muster")), 2)
 
+    def test_favorites(self):
+        importer.import_file(self.conn, self.v1)
+        key = {"gruppe": 1, "ort": 24, "untergruppe": 1, "art": 0}
+        self.assertEqual(queries.favorite_key(key), "0124010")
+        self.assertEqual(queries.key_from_prefix("0124010"), key)
+        self.assertTrue(queries.toggle_favorite(self.conn, "0124010002"))
+        self.assertTrue(queries.toggle_favorite(self.conn, "0124"))
+        self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(favoriten=True)), 1)
+        self.assertFalse(queries.toggle_favorite(self.conn, "0124010002"))
+        self.assertEqual(queries.favorites(self.conn), {"0124"})
+
     def test_excel_export(self):
         import xml.etree.ElementTree as ET
         import zipfile

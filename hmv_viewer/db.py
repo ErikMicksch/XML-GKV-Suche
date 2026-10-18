@@ -65,6 +65,11 @@ CREATE TABLE IF NOT EXISTS history(
 );
 CREATE INDEX IF NOT EXISTS ix_history_entity_k ON history(entity, k);
 CREATE INDEX IF NOT EXISTS ix_history_import ON history(import_id, entity, change_type);
+
+CREATE TABLE IF NOT EXISTS favorit(
+    k        TEXT PRIMARY KEY,                -- Nummern-Präfix: 2/4/6/7 Stellen = Gruppe/Ort/Untergruppe/Art, 10 = Produkt
+    added_at TEXT
+);
 """
 
 

@@ -74,6 +74,11 @@ In der GUI:
   Unten: **Details** und **Historie** des gewählten Produkts mit Diff (alt/neu) je Feld.
 * **Versionen & Änderungen**: alle Importe mit Zählern; Auswahl zeigt die Änderungen der Version,
   Doppelklick springt zum Produkt.
+* **Favoriten**: Produkte per Klick in die ★-Spalte, Strg+D, Rechtsklick oder Button im Detailbereich merken;
+  Gruppen/Orte/Untergruppen/Arten per Rechtsklick im Baum. Alles erscheint oben im Baum unter „★ Favoriten“
+  (Strg+B). Favoriten liegen in der Datenbank und bleiben bei neuen Importen erhalten.
+* **Schnellzugriff**: Filterfeld über dem Baum (Name oder Nummer, z. B. „10.50“), Gruppe/Art in den Details
+  anklicken springt dorthin, ↓ aus der Suche in die Trefferliste. Alle Tastenkürzel: Button *Tastenkürzel*.
 
 Importiert man dieselbe Datei zweimal, erkennt das Programm das (SHA-256) und fragt nach.
 Enthält eine neue XML weniger als 50 % der bisherigen Produkte, wird vor dem Import gewarnt

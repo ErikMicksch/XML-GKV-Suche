@@ -17,6 +17,7 @@ ORDER_COLUMNS = {
     "aufnahme": "p.aufnahmedatum",
     "aenderung": "p.aenderungsdatum",
     "version": "p.last_import_change",
+    "fav": "p.nummer IN (SELECT k FROM favorit)",
 }
 
 
@@ -31,6 +32,7 @@ class ProductFilter:
     art: int | None = None
     import_id: int | None = None   # nur Produkte, die in dieser Version eine Änderung hatten
     change_type: str | None = None  # NEU | GEAENDERT | ENTFERNT | REAKTIVIERT
+    favoriten: bool = False        # nur als Favorit markierte Produkte
 
 
 def _like(term: str) -> str:
@@ -50,6 +52,8 @@ def _build(f: ProductFilter):
         where.append("p.nummer IN (SELECT k FROM history WHERE entity='PRODUKT' AND change_type=?)")
         params.append(f.change_type)
 
+    if f.favoriten:
+        where.append("p.nummer IN (SELECT k FROM favorit)")
     if f.status == "aktiv":
         where.append("p.active=1")
     elif f.status == "entfernt":
@@ -182,6 +186,32 @@ def version_changes(conn, import_id: int, change_type: str | None = None, limit:
             "fields": ", ".join(FIELD_LABELS.get(f, f) for f in changes),
         })
     return out
+
+
+# ----------------------------------------------------------------------------------------------
+# Favoriten (Produkte und Hierarchie-Knoten, gespeichert als Nummern-Präfix)
+_PREFIX_PARTS = (("gruppe", 0, 2), ("ort", 2, 4), ("untergruppe", 4, 6), ("art", 6, 7))
+
+
+def favorite_key(key: dict) -> str:
+    """Hierarchie-Schlüssel -> Nummern-Präfix, z. B. {gruppe: 1, ort: 24} -> '0124'."""
+    return "".join(str(key[c]).zfill(b - a) for c, a, b in _PREFIX_PARTS if key.get(c) is not None)
+
+
+def key_from_prefix(k: str) -> dict:
+    return {c: int(k[a:b]) for c, a, b in _PREFIX_PARTS if len(k) >= b}
+
+
+def favorites(conn) -> set[str]:
+    return {r[0] for r in conn.execute("SELECT k FROM favorit")}
+
+
+def toggle_favorite(conn, k: str) -> bool:
+    """Schaltet den Favoriten um; True = jetzt Favorit."""
+    if conn.execute("DELETE FROM favorit WHERE k=?", (k,)).rowcount:
+        return False
+    conn.execute("INSERT INTO favorit(k, added_at) VALUES(?, datetime('now', 'localtime'))", (k,))
+    return True
 
 
 # ----------------------------------------------------------------------------------------------

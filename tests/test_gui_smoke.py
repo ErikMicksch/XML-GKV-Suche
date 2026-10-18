@@ -55,6 +55,7 @@ class Tree(Dummy):
 
     def delete(self, *iids):
         for i in iids:
+            self.delete(*self.get_children(i))   # wie Tk: Kinder mit löschen
             self.items.pop(i, None)
             if i in self.order:
                 self.order.remove(i)
@@ -149,6 +150,29 @@ class GuiSmoke(unittest.TestCase):
         hk = app.hist_tree.get_children()
         self.assertTrue(hk)
         app._on_hist_select(None)
+        # Favoriten: Produkt + Gruppe merken, Favoriten-Knoten filtert
+        fav = kids[0]
+        app._toggle_selected_fav()
+        app._toggle_fav(fav[:2])
+        self.assertEqual(app.favs, {fav, fav[:2]})
+        self.assertIn(f"fav:{fav[:2]}", app.hier.get_children("fav"))
+        app.var_version.set("Alle Versionen")
+        app.var_status.set("Alle")
+        app.show_favorites()
+        self.assertTrue(app.filter.favoriten)
+        self.assertEqual(app.products.get_children(), [fav])
+        app._toggle_fav(fav)
+        self.assertEqual(app.products.get_children(), [])
+        # Hierarchie-Filter und Sprung aus den Details
+        app.var_hier.set("zzz-nichts")
+        app._load_hierarchy()
+        self.assertEqual(app.hier.get_children("all"), [])
+        app.var_hier.set("")
+        app._load_hierarchy()
+        app.reset_filter()
+        app._show_detail(fav)
+        app._reveal_level("art")
+        self.assertEqual((app.filter.gruppe, app.filter.art), (int(fav[:2]), int(fav[6])))
         app.var_text.set("muster")
         app.apply_filter()
         app.reset_filter()
