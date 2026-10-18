@@ -2,8 +2,11 @@
 
 Datenbank-Speicherort (in dieser Reihenfolge):
   1. Umgebungsvariable HMV_DB
-  2. Ordner "data" neben der gestarteten Datei (Einzeldatei hmv_viewer_app.py bzw. .exe, sonst Projektordner)
-  3. falls dort nicht beschreibbar: %LOCALAPPDATA%\\HMV-Viewer (Windows) bzw. ~/HMV-Viewer
+  2. Ordner "data" neben der gestarteten Datei (Einzeldatei hmv_viewer_app.py bzw. .exe, sonst Projektordner) –
+     liegt dort schon eine hmv.db, wird sie auch ohne Schreibrecht genutzt (dann nur lesen)
+  3. sonst, falls dort nicht beschreibbar: %LOCALAPPDATA%\\HMV-Viewer (Windows) bzw. ~/HMV-Viewer
+Es werden nie Adminrechte benötigt: geschrieben wird nur in den Datenordner, %LOCALAPPDATA%, die Benutzer-Registry
+(HKCU) und den selbst gewählten Favoriten-Ordner.
 """
 from __future__ import annotations
 
@@ -41,6 +44,8 @@ def default_db_path() -> Path:
     if env:
         return Path(env).expanduser()
     beside = app_dir() / "data"
+    if (beside / "hmv.db").exists():   # gemeinsame DB neben der .exe immer nutzen, auch ohne Schreibrecht (nur lesen)
+        return beside / "hmv.db"
     if _writable_dir(beside):
         return beside / "hmv.db"
     local = os.environ.get("LOCALAPPDATA")

@@ -32,8 +32,11 @@ def _date(v):
 
 def export_excel(conn, path, f: ProductFilter, *, include_history: bool = True,
                  include_versions: bool = True, include_initial_in_history: bool = False,
-                 progress: Progress | None = None) -> dict:
-    """Schreibt die Produkte (gemäß Filter f) nach `path`. Gibt Zähler zurück."""
+                 progress: Progress | None = None, favorites=None) -> dict:
+    """Schreibt die Produkte (gemäß Filter f) nach `path`. Gibt Zähler zurück.
+
+    favorites: optional FavoriteStore -> zusätzliche Spalten „Favorit“ und „Notiz (persönlich)“.
+    """
     progress = progress or (lambda s, c, t: None)
     names = Names(conn)
     vlabels = queries.version_labels(conn)
@@ -41,22 +44,28 @@ def export_excel(conn, path, f: ProductFilter, *, include_history: bool = True,
     total = queries.count_products(conn, f)
     n = n_hist = 0
 
+    header = ["Hilfsmittelnummer (10-stellig)", "Hilfsmittelnummer", "Produktart-Nr. (7-stellig)",
+              "Produktgruppe", "Anwendungsort", "Untergruppe", "Produktart", "Bezeichnung", "Hersteller",
+              "Merkmale", "Aufnahmedatum", "Änderungsdatum (HMV)", "Status", "Letzte Änderung (Version)",
+              "Änderungstyp", "Kommentare (für alle sichtbar)"]
+    widths = [18, 16, 14, 28, 28, 34, 38, 50, 32, 70, 14, 14, 10, 22, 16, 60]
+    comments = {}
+    for c in conn.execute("SELECT * FROM kommentar ORDER BY id"):
+        comments.setdefault(c["nummer"], []).append(f"{c['user'] or '?'}, {(c['at'] or '')[:16].replace('T', ' ')}: {c['text']}")
+    if favorites is not None:
+        header += ["Favorit", "Kategorie (persönlich)", "Notiz (persönlich)"]
+        widths += [9, 20, 50]
+
     with xlsx.Workbook(path) as wb:
         # ---- Blatt Produkte ------------------------------------------------------------------
-        ws = wb.add_sheet(
-            "Produkte",
-            header=["Hilfsmittelnummer (10-stellig)", "Hilfsmittelnummer", "Produktart-Nr. (7-stellig)",
-                    "Produktgruppe", "Anwendungsort", "Untergruppe", "Produktart", "Bezeichnung", "Hersteller",
-                    "Merkmale", "Aufnahmedatum", "Änderungsdatum (HMV)", "Status", "Letzte Änderung (Version)",
-                    "Änderungstyp"],
-            widths=[18, 16, 14, 28, 28, 34, 38, 50, 32, 70, 14, 14, 10, 22, 16])
+        ws = wb.add_sheet("Produkte", header=header, widths=widths)
         for p in queries.iter_products(conn, f):
             path_ = names.path(p)
             nr = p["nummer"]
             ctype = p["last_change_type"]
             is_baseline = p["last_import_change"] == first_id and ctype == "NEU"
             fill = xlsx.DEFAULT if is_baseline else xlsx.FILL_BY_CHANGE.get(ctype, xlsx.DEFAULT)
-            ws.append([
+            row = [
                 nr, format_nummer(nr), format_nummer(nr[:7]),
                 path_["gruppe"], path_["ort"], path_["untergruppe"], path_["art"],
                 _txt(p["bezeichnung"]), _txt(p["hersteller"]), (_txt(p["merkmale"]), xlsx.WRAP),
@@ -64,7 +73,12 @@ def export_excel(conn, path, f: ProductFilter, *, include_history: bool = True,
                 ("aktiv" if p["active"] else "entfernt", fill),
                 ("Erstimport" if is_baseline else vlabels.get(p["last_import_change"], ""), fill),
                 ("" if is_baseline else CHANGE_LABELS.get(ctype, ctype or ""), fill),
-            ])
+            ]
+            row.append((_txt("\n".join(comments[nr])), xlsx.WRAP) if nr in comments else None)
+            if favorites is not None:
+                cat = favorites.categories.get(favorites.marks.get(nr), {}).get("name", "")
+                row += ["ja" if nr in favorites.favs else "", cat, (_txt(favorites.notes.get(nr)), xlsx.WRAP)]
+            ws.append(row)
             n += 1
             if n % 2000 == 0:
                 progress("Produkte schreiben …", n, total)

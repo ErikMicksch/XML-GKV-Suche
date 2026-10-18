@@ -1,191 +1,381 @@
-"""Rauchtest der GUI-Logik OHNE echtes tkinter (Stub-Module).
+"""Rauchtest der Qt-Oberfläche ohne sichtbares Fenster (QT_QPA_PLATFORM=offscreen).
 
-Prüft, dass Aufbau, Filter, Detailansicht, Historie, Versionen-Tab sowie Import-/Export-Ablauf der GUI
-ohne Laufzeitfehler durchlaufen. Das ersetzt keinen Blick auf die echte Oberfläche.
+Prüft Aufbau, Filter, Favoriten-Datei, Notizen, Hersteller-Filter, Kopieren, Versionen und den Import-Ablauf.
+Das ersetzt keinen Blick auf die echte Oberfläche.
 """
+import json
 import os
 import sys
 import tempfile
-import threading
 import time
-import types
 import unittest
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-
-class Dummy:
-    def __init__(self, *a, **k):
-        pass
-
-    def __getattr__(self, name):
-        if name.startswith("winfo_"):
-            return lambda *a, **k: 0
-        return lambda *a, **k: Dummy()
+try:
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QApplication, QMessageBox
+except ImportError:  # PySide6 fehlt -> Test überspringen
+    QApplication = None
 
 
-class Var:
-    def __init__(self, master=None, value=""):
-        self._v, self._cb = value, []
-
-    def get(self):
-        return self._v
-
-    def set(self, v):
-        self._v = v
-        for cb in self._cb:
-            cb()
-
-    def trace_add(self, mode, cb):
-        self._cb.append(lambda: cb())
-
-
-class Tree(Dummy):
-    def __init__(self, *a, **k):
-        self.items, self.order, self.sel, self.n = {}, [], [], 0
-
-    def insert(self, parent, index, iid=None, **kw):
-        if iid is None:
-            self.n += 1
-            iid = f"I{self.n}"
-        self.items[iid] = dict(kw, parent=parent)
-        self.order.append(iid)
-        return iid
-
-    def delete(self, *iids):
-        for i in iids:
-            self.delete(*self.get_children(i))   # wie Tk: Kinder mit löschen
-            self.items.pop(i, None)
-            if i in self.order:
-                self.order.remove(i)
-        self.sel = [s for s in self.sel if s in self.items]
-
-    def get_children(self, item=""):
-        return [i for i in self.order if self.items[i]["parent"] == item]
-
-    def selection(self):
-        return list(self.sel)
-
-    def selection_set(self, i):
-        self.sel = [i]
-
-    def exists(self, i):
-        return i in self.items
-
-
-class Tk(Dummy):
-    afters = []
-
-    def after(self, ms, fn=None):
-        Tk.afters.append(fn)
-        return len(Tk.afters)
-
-
-def install_stubs():
-    tk = types.ModuleType("tkinter")
-    ttk = types.ModuleType("tkinter.ttk")
-    fd = types.ModuleType("tkinter.filedialog")
-    mb = types.ModuleType("tkinter.messagebox")
-    tk.Tk = Tk
-    tk.Toplevel = Tk
-    tk.StringVar = Var
-    tk.BooleanVar = Var
-    tk.TclError = Exception
-    for n in ("Text", "Menu", "Label"):
-        setattr(tk, n, Dummy)
-    for n in ("Frame", "Label", "Button", "Entry", "Combobox", "Checkbutton", "Radiobutton", "Scrollbar",
-              "Notebook", "PanedWindow", "Progressbar", "Style"):
-        setattr(ttk, n, Dummy)
-    ttk.Treeview = Tree
-    mb.calls = []
-    for n in ("showinfo", "showerror", "askyesno"):
-        setattr(mb, n, (lambda name: lambda *a, **k: mb.calls.append((name, a)) or False)(n))
-    tk.ttk, tk.filedialog, tk.messagebox = ttk, fd, mb
-    sys.modules.update({"tkinter": tk, "tkinter.ttk": ttk, "tkinter.filedialog": fd, "tkinter.messagebox": mb})
-    return mb
-
-
+@unittest.skipIf(QApplication is None, "PySide6 nicht installiert")
 class GuiSmoke(unittest.TestCase):
     def test_flow(self):
-        mb = install_stubs()
-        from hmv_viewer import gui
+        from hmv_viewer import gui, queries
+        from hmv_viewer.queries import ProductFilter
+        from hmv_viewer.favorites import FILE_NAME
         from tests.make_sample import write_sample
 
+        calls = []
+        QMessageBox.information = staticmethod(lambda *a, **k: calls.append(a[2]))
+        QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.StandardButton.No)
+        app = gui.setup_app()
         tmp = tempfile.mkdtemp()
-        v1 = write_sample(os.path.join(tmp, "20260101_HMV.xml"), variant=1)
-        v2 = write_sample(os.path.join(tmp, "20260201_HMV.xml"), variant=2)
-        app = gui.App(os.path.join(tmp, "t.db"))
+        fav_dir = os.path.join(tmp, "favs")
+        settings = QSettings(os.path.join(tmp, "s.ini"), QSettings.Format.IniFormat)
+        win = gui.MainWindow(os.path.join(tmp, "t.db"), fav_dir=fav_dir, settings=settings, user="Meier")
 
-        def pump(path_cb):
-            done = []
-            threading.Thread(target=lambda: (path_cb(), done.append(1))).start()
+        def wait_import(path):
+            n = len(calls)
+            win._run_import(path, False)
             t0 = time.time()
-            while time.time() - t0 < 30:
-                pending, Tk.afters = Tk.afters, []
-                for fn in pending:
-                    if fn:
-                        fn()
-                if not done or Tk.afters:
-                    time.sleep(0.05)
-                if done and not Tk.afters:
-                    break
+            while len(calls) == n and time.time() - t0 < 30:
+                app.processEvents()
+                time.sleep(0.02)
 
-        app._run_import(v1, False)
-        pump(lambda: None)
-        self.assertTrue(any(c[0] == "showinfo" for c in mb.calls), mb.calls)
-        self.assertEqual(len(app.products.get_children()), 4)
-        app._run_import(v2, False)
-        pump(lambda: None)
-        # nach Import V2: Filter auf V2, Status alle -> 3 Änderungen
-        kids = app.products.get_children()
-        self.assertEqual(app.filter.import_id, 2)
-        self.assertEqual(len(kids), 3)
-        tags = {k: app.products.items[k]["tags"] for k in kids}
-        self.assertIn(("GEAENDERT",), tags.values())
-        self.assertIn(("ENTFERNT",), tags.values())
-        self.assertIn(("NEU",), tags.values())
-        app.products.selection_set(kids[0])
-        app._on_product_select(None)
-        hk = app.hist_tree.get_children()
-        self.assertTrue(hk)
-        app._on_hist_select(None)
-        # Favoriten: Produkt + Gruppe merken, Favoriten-Knoten filtert
-        fav = kids[0]
-        app._toggle_selected_fav()
-        app._toggle_fav(fav[:2])
-        self.assertEqual(app.favs, {fav, fav[:2]})
-        self.assertIn(f"fav:{fav[:2]}", app.hier.get_children("fav"))
-        app.var_version.set("Alle Versionen")
-        app.var_status.set("Alle")
-        app.show_favorites()
-        self.assertTrue(app.filter.favoriten)
-        self.assertEqual(app.products.get_children(), [fav])
-        app._toggle_fav(fav)
-        self.assertEqual(app.products.get_children(), [])
-        # Hierarchie-Filter und Sprung aus den Details
-        app.var_hier.set("zzz-nichts")
-        app._load_hierarchy()
-        self.assertEqual(app.hier.get_children("all"), [])
-        app.var_hier.set("")
-        app._load_hierarchy()
-        app.reset_filter()
-        app._show_detail(fav)
-        app._reveal_level("art")
-        self.assertEqual((app.filter.gruppe, app.filter.art), (int(fav[:2]), int(fav[6])))
-        app.var_text.set("muster")
-        app.apply_filter()
-        app.reset_filter()
-        app._sort_by("bezeichnung")
-        app._sort_by("bezeichnung")
-        app._load_versions()
-        app._show_version_in_products()
-        out = os.path.join(tmp, "x.xlsx")
-        app._export_with_options  # existiert
-        mb.calls.clear()
-        app.var_version.set("Alle Versionen")
-        app.apply_filter()
-        self.assertEqual(app.filter.import_id, None)
+        self.assertIs(win.list_stack.currentWidget(), win.empty)   # leerer Start: Hinweis statt leerer Tabelle
+        wait_import(write_sample(os.path.join(tmp, "20260101_HMV.xml"), variant=1))
+        self.assertEqual(win.table.rowCount(), 4)
+
+        # Favoriten + Notiz landen in der persönlichen Datei
+        win.table.selectRow(0)
+        fav = win.current_nummer
+        win._toggle_selected_fav()
+        win._toggle_fav(fav[:2])
+        win.note_edit.setPlainText("Hinweis bis 2027")
+        win._save_note()
+        with open(os.path.join(fav_dir, FILE_NAME), encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.assertEqual(set(data["favoriten"]), {fav, fav[:2]})
+        self.assertEqual(data["notizen"], {fav: "Hinweis bis 2027"})
+        self.assertEqual(win.table.item(0, gui.COL["notiz"]).text(), "Hinweis bis 2027")
+
+        # Import V2: betroffene Favoriten werden direkt angezeigt
+        wait_import(write_sample(os.path.join(tmp, "20260201_HMV.xml"), variant=2))
+        self.assertEqual(win.filter.import_id, 2)
+        self.assertTrue(win.filter.favoriten)
+        self.assertIn("Ihrer Favoriten", calls[-1])
+
+        # Ganze Gruppe als Favorit: alle Produkte der Gruppe gehören dazu, Gruppe erscheint als Baum
+        win.reset_filter()
+        win.show_favorites()
+        self.assertIn(fav, win.row_nummer)
+        self.assertGreater(len(win.row_nummer), 1)
+        entries = [it for it in win._walk(win.fav_item) if it.data(0, gui.ENTRY_ROLE)]
+        self.assertEqual([tuple(it.data(0, gui.ENTRY_ROLE))[1] for it in entries], [fav[:2]])
+        self.assertGreater(entries[0].childCount(), 0)                         # aufklappbarer Unterbaum
+        other = next(nr for nr in win.row_nummer if nr != fav)
+        self.assertEqual(win.table.item(win.row_nummer.index(other), gui.COL["fav"]).text(), "☆")
+        win.table.selectRow(win.row_nummer.index(fav))
+        win._copy("table")
+        self.assertIn("Hinweis bis 2027", QApplication.clipboard().text())
+        win._on_detail_link("hersteller")
+        self.assertTrue(win.filter.hersteller)
+        self.assertFalse(win.filter.favoriten)
+
+        # Mehrfachauswahl -> Favoriten
+        win.reset_filter()
+        win.table.selectAll()
+        win._toggle_selected_fav()
+        self.assertEqual(sum(len(k) == 10 for k in win.store.favs), 4)
+
+        # Gemeinsame Liste mit Unterliste: anlegen, Auswahl hinzufügen, anzeigen, Produkt entfernen
+        c = win._new_container(("liste", None), select=False, name="Pumpen Liste")
+        lid = c[1]
+        win._container_add(c, win._selected_nummern())
+        self.assertEqual(win.lists[lid]["n"], 4)
+        sub = win._new_container(c, select=False, name="Unterliste A")
+        self.assertEqual(win.lists[sub[1]]["parent_id"], lid)
+        self.assertIs(win._item_for_key({"liste": sub[1]}).parent(), win._item_for_key({"liste": lid}))
+        win._select_tree(win._item_for_key({"liste": lid}))
+        self.assertEqual(win.filter.liste_id, lid)
+        self.assertEqual(len(win.row_nummer), 4)
+        win._remove_selected_from_current(win.row_nummer[:1])
+        self.assertEqual(len(win.row_nummer), 3)
+        win.table.selectRow(0)
+        win._on_detail_link(f"liste:{lid}")
+        win._rename_container(c, "Pumpen 2027")
+        self.assertEqual(win.lists[lid]["name"], "Pumpen 2027")
+
+        # Private Liste in privater Liste, ganze Gruppe als Eintrag
+        group_k = fav[:2]
+        f = ProductFilter(status="aktiv", **queries.key_from_prefix(group_k))
+        n = queries.count_products(win.conn, f)
+        pc = win._new_container(("fav", None), select=False, name="Privat")
+        psub = win._new_container(pc, select=False, name="Privat Unter")
+        win._container_add(psub, [group_k])
+        item = win._item_for_key({"pliste": psub[1]})
+        self.assertIs(item.parent(), win._item_for_key({"pliste": pc[1]}))
+        self.assertTrue(any(item.child(i).data(0, gui.ENTRY_ROLE) for i in range(item.childCount())))
+        win._select_tree(item)
+        self.assertEqual(len(win.row_nummer), n)
+        with open(os.path.join(fav_dir, FILE_NAME), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["listen"][psub[1]]["items"].keys(), {group_k})
+
+        # Dieselbe Gruppe einzeln (fester Stand) in eine gemeinsame Liste – über den Dialog
+        dlg = gui.AddToListDialog(win, "Gruppe", n, True)
+        target = next(it for it in [dlg.tree.topLevelItem(1)] + list(win._walk(dlg.tree.topLevelItem(1)))
+                      if tuple(it.data(0, gui.UD)) == c)
+        dlg.tree.setCurrentItem(target)
+        dlg.rb_single.setChecked(True)
+        dlg._accept()
+        self.assertEqual((dlg.target, dlg.whole_group), (c, False))
+        win._container_add(dlg.target, win._nummern_for(f, n))
+        self.assertEqual(win.lists[lid]["n"], n)
+
+        # Farbkategorie setzen, filtern, Farbfeld in der Liste
+        win.reset_filter()
+        win.table.selectRow(0)
+        first = win.row_nummer[0]
+        cid = next(iter(win.store.categories))
+        win._set_mark([first], cid)
+        self.assertFalse(win.table.item(0, gui.COL["kat"]).icon().isNull())
+        win.cb_kat.setCurrentIndex(win.cb_kat.findData(cid))
+        win.apply_filter()
+        self.assertEqual(win.row_nummer, [first])
+
+        # Suche findet eigene Notiz
+        win.reset_filter()
+        win.search.setText("hinweis bis")
+        win.apply_filter()
+        self.assertEqual(win.row_nummer, [fav])
+
+        # Kommentar für alle: in der DB mit Benutzer, von Suche und Notiz-Suchfeld gefunden
+        self.assertEqual(settings.value("benutzer"), "Meier")
+        win.table.selectRow(0)
+        win._send_comment("Rückruf Hersteller 2027")
+        row = queries.comments_for(win.conn, fav)[-1]
+        self.assertEqual((row["text"], row["user"]), ("Rückruf Hersteller 2027", "Meier"))
+        self.assertEqual(win.detail_tabs.tabText(1), "Kommentare (1)")
+        win.reset_filter()
+        win.note_search.setText("rückruf")
+        win.apply_filter()
+        self.assertEqual(win.row_nummer, [fav])
+        self.assertIn("Rückruf Hersteller 2027", win.table.item(0, gui.COL["gnotiz"]).text())
+        win.note_search.setText("hinweis bis")       # eigene Notiz über das Notiz-Feld
+        win.apply_filter()
+        self.assertEqual(win.row_nummer, [fav])
+        win.reset_filter()
+        win.search.setText("rückruf")                 # große Suche findet Kommentare auch
+        win.apply_filter()
+        self.assertEqual(win.row_nummer, [fav])
+
+        # Benutzer wechseln -> Listenänderung zeigt neuen Namen
+        win._set_user("Schulz")
+        win._container_add(c, [fav])
+        win._container_remove(c, [fav])
+        self.assertEqual(win.lists[lid]["changed_by"], "Schulz")
+        self.assertEqual(queries.list_users(win.conn), ["Meier", "Schulz"])
+
+        # Design umschalten baut alles neu auf
+        for name in gui.THEME_NAMES:
+            win.set_theme(name)
+            self.assertEqual(settings.value("design"), name)
+        self.assertEqual(gui.BG, gui.THEMES["Dunkel"]["BG"])
+        win.set_theme("Classic")
+
+        win.reset_filter()
+        win.table.selectRow(0)
+        win._reveal_level("art")
+        self.assertIsNotNone(win.filter.art)
+        win.hier_filter.setText("zzz-nichts")
+        win._on_hier_filter()
+        self.assertEqual(win.all_item.childCount(), 0)
+        win.reset_filter()
+        self.assertGreater(win.all_item.childCount(), 0)
+        win._sort_by(gui.COL["bezeichnung"])
+        win._sort_by(gui.COL["notiz"])   # nicht sortierbar -> keine Ausnahme
+        win._load_versions()
+        win._show_version_in_products()
+        self.assertEqual(win.filter.import_id, 2)
+        # ---- Verbesserungen v2.3
+        from hmv_viewer import ui_extras
+        # Zuletzt angesehen: Baum-Eintrag filtert auf die geöffneten Produkte
+        win.reset_filter()
+        win.table.selectRow(0)
+        seen = win.current_nummer
+        self.assertEqual(win.recent[0], seen)
+        win._select_tree(win.recent_item)
+        self.assertIn(seen, win.row_nummer)
+        # Schnellzugriff findet Funktionen und Produkte
+        titles = [t for _, t, _, _ in win._palette_items("pumpe")]
+        self.assertTrue(any("Muster Pumpe" in t for t in titles))
+        self.assertTrue(any(t == "Excel-Export" for _, t, _, _ in win._palette_items("export")))
+        win._open_product(fav)
+        self.assertEqual(win.current_nummer, fav)
+        # Gespeicherte Suche
+        win.reset_filter()
+        win.search.setText("pumpe")
+        win.apply_filter()
+        win.store.save_search("Pumpen", win._search_state())
+        win.reset_filter()
+        win._apply_search_state(win.store.searches["Pumpen"])
+        self.assertEqual(win.filter.text, "pumpe")
+        # Nummernliste erkennen (mit und ohne Punkte, Dubletten, unbekannte)
+        self.assertEqual(ui_extras.parse_numbers("x 01.24.01.0001, 0124010003 und 01.24.01.0001 / 9999999999"),
+                         ["0124010001", "0124010003", "9999999999"])
+        # Vergleich: Dialog lässt sich für 2 Produkte aufbauen
+        win.reset_filter()
+        dlg = ui_extras.CompareDialog(win, [dict(queries.get_product(win.conn, n), nummer_fmt=n, aufnahme="", status="")
+                                            for n in win.row_nummer[:2]], win.names)
+        dlg.close()
+        # Rückgängig: Favorit setzen und wieder zurücknehmen
+        target = next(n for n in win.row_nummer if n not in win.store.favs) if any(
+            n not in win.store.favs for n in win.row_nummer) else None
+        if target is None:
+            target = win.row_nummer[0]
+            win._toggle_fav(target, record=False)
+        win._toggle_fav(target)
+        self.assertIn(target, win.store.favs)
+        win.table.setFocus()
+        win._undo_last()
+        self.assertNotIn(target, win.store.favs)
+        # Kartenansicht und Spaltenwahl
+        win.set_view_mode("karten")
+        self.assertEqual(win.cards.count(), len(win.row_nummer))
+        self.assertIs(win.list_stack.currentWidget(), win.cards)
+        win.set_view_mode("tabelle")
+        hdr = win.table.horizontalHeader()
+        hdr.setSectionHidden(gui.COL["hersteller"], True)
+        win._reset_columns()
+        self.assertFalse(hdr.isSectionHidden(gui.COL["hersteller"]))
+        # Startseite, Ansicht, Tagessicherung, Info, Abo, Was ist neu
+        win._goto_page_widget(2)
+        self.assertIn(win.user, win.greeting.text())
+        win.set_view(density="Kompakt", font_pt=11)
+        self.assertEqual(gui.ROW_H, 24)
+        win.set_view(density="Normal", font_pt=10)
+        backup = win._auto_backup(sync=True)
+        self.assertTrue(backup.exists())
+        self.assertIsNone(win._auto_backup(sync=True))         # nur einmal pro Tag
+        win._toggle_abo(lid)
+        self.assertIn(lid, win.store.abos)
+        win._last_open = "2000-01-01T00:00:00"
+        shown = []
+        orig = gui.TextDialog.exec
+        gui.TextDialog.exec = lambda self_: shown.append(self_.view.toPlainText()) or 0
+        try:
+            win._show_whats_new(auto=True)
+            win._show_list_log(lid)
+            win._show_info()
+        finally:
+            gui.TextDialog.exec = orig
+        self.assertIn("Neue Importe", shown[0])
+        self.assertIn("Neue Kommentare", shown[0])
+        self.assertIn("hinzugefügt", shown[1])
+        self.assertIn("Journal-Modus", shown[2])
+        win._goto_page_widget(0)
+
+        # Vergleichen mit …: Popup wählt ein zweites Produkt, Vergleich ist eine Tabelle mit Eigenschaften
+        win.reset_filter()
+        base, other = win.row_nummer[0], win.row_nummer[1]
+        orig_picker, orig_cmp = gui.ProductPicker.exec, gui.CompareDialog.exec
+        seen_pick, seen_cmp = [], []
+
+        def fake_pick(dlg):
+            seen_pick.append(dlg.list.count())
+            dlg.list.item(0).setSelected(True)
+            dlg._accept()
+            return gui.QDialog.DialogCode.Accepted
+
+        def fake_cmp(dlg):
+            seen_cmp.append(dlg)
+            return 0
+
+        gui.ProductPicker.exec, gui.CompareDialog.exec = fake_pick, fake_cmp
+        try:
+            win._compare_with(base)
+        finally:
+            gui.ProductPicker.exec, gui.CompareDialog.exec = orig_picker, orig_cmp
+        self.assertGreater(seen_pick[0], 0)                                  # gleiche Produktart vorgeschlagen
+        cmp = seen_cmp[0]
+        self.assertEqual(len(cmp.products), 2)
+        self.assertEqual(cmp.products[0]["nummer"], base)
+        self.assertEqual(cmp.table.horizontalHeaderItem(0).text(), "Eigenschaft")
+        self.assertEqual(cmp.table.item(0, 0).text(), "Allgemein")
+        all_rows = cmp.table.rowCount()
+        cmp.only_diff.setChecked(True)
+        self.assertLess(cmp.table.rowCount(), all_rows)
+        cmp._copy()
+        self.assertIn("Eigenschaft", QApplication.clipboard().text())
+        # Merkmale: Name/Wert-Zeilen, Abschnitte und Fließtext mit Silbentrennung
+        self.assertEqual(ui_extras.parse_merkmale("Gewicht: 4,7 kg\nFarbe: rot\nBauart-Nr.: DHI 1"),
+                         {"Gewicht": "4,7 kg", "Farbe": "rot", "Bauart-Nr.": "DHI 1"})
+        self.assertEqual(ui_extras.parse_merkmale("Beschreibung / Aufbau:\nKissen aus\nSchaum."),
+                         {"Beschreibung / Aufbau": "Kissen aus Schaum."})
+        self.assertEqual(ui_extras.parse_merkmale("Gestell, Handgriffe hö-\nhenverstellbar.\nkleine Ausführung"),
+                         {"Beschreibung": "Gestell, Handgriffe höhenverstellbar. kleine Ausführung"})
+
+        # Änderungen anderer: Kollege kommentiert und färbt ein -> erscheint im neuen Reiter mit Zähler
+        queries.add_comment(win.conn, other, "Kollegen-Kommentar", "Kollege")
+        queries.log_activity(win.conn, "Kollege", "kategorie", [other], "Kritisch", "#D64541")
+        win._update_activity_badge()
+        self.assertIn("(", win.nav_group.button(3).text())
+        win._goto_page_widget(3)
+        texts = [win.act_table.item(r, 5).text() for r in range(win.act_table.rowCount())]
+        self.assertIn("Kollegen-Kommentar", texts)
+        self.assertIn("eingefärbt: Kritisch", texts)
+        self.assertEqual(win.nav_group.button(3).text(), "Änderungen\nanderer")   # gesehen -> Zähler weg
+        win.act_kind.setCurrentIndex(win.act_kind.findData("kategorie"))
+        win.refresh_activity()
+        self.assertTrue(all(win.act_table.item(r, 2).text() == "Farbkategorie" for r in range(win.act_table.rowCount())))
+        row = next(r for r in range(win.act_table.rowCount()) if win.act_table.item(r, 3).text())
+        win._open_activity(row)
+        self.assertEqual(win.stack.currentIndex(), 0)
+        # eigene Farbmarkierung wird für die anderen protokolliert
+        before = win.conn.execute("SELECT COUNT(*) FROM aktivitaet WHERE user=?", (win.user,)).fetchone()[0]
+        win._set_mark([base], next(iter(win.store.categories)), record=False)
+        after = win.conn.execute("SELECT COUNT(*) FROM aktivitaet WHERE user=?", (win.user,)).fetchone()[0]
+        self.assertEqual(after, before + 1)
+
+        win.close()
+
+        # Neuer Start liest die Favoriten aus der Datei
+        win2 = gui.MainWindow(os.path.join(tmp, "t.db"), fav_dir=fav_dir, settings=settings)
+        self.assertIn(fav, win2.store.favs)
+        win2.close()
+
+    def test_activity_only_own_entries(self):
+        """Nur eigene Einträge vorhanden: Hinweis statt leerer Tabelle; Schalter zeigt sie; anderer Benutzer sieht sie."""
+        from hmv_viewer import gui, queries
+        from tests.make_sample import write_sample
+        from hmv_viewer import db, importer
+
+        gui.setup_app()
+        tmp = tempfile.mkdtemp()
+        dbp = os.path.join(tmp, "t.db")
+        conn = db.connect(dbp)
+        importer.import_file(conn, write_sample(os.path.join(tmp, "20260101_HMV.xml"), variant=1))
+        conn.close()
+        settings = QSettings(os.path.join(tmp, "s.ini"), QSettings.Format.IniFormat)
+        win = gui.MainWindow(dbp, fav_dir=os.path.join(tmp, "f"), settings=settings, user="Erik", auto_backup=False)
+        win.table.selectRow(0)
+        win._send_comment("Hallo hier ist Erik")
+        win._goto_page_widget(3)
+        self.assertIs(win.act_stack.currentWidget(), win.act_empty)
+        self.assertIn("stammen von Ihnen", win.act_empty.text())
+        win.act_mine.setChecked(True)
+        self.assertIs(win.act_stack.currentWidget(), win.act_table)
+        self.assertEqual(win.act_table.item(0, 5).text(), "Hallo hier ist Erik")
+        win.act_mine.setChecked(False)
+        win._set_user("Test")
+        win._goto_page_widget(3)
+        self.assertEqual([win.act_table.item(r, 1).text() for r in range(win.act_table.rowCount())], ["Erik"])
+        self.assertEqual(len(queries.list_users(win.conn)), 2)
+        win.close()
 
 
 if __name__ == "__main__":

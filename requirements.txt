@@ -1,2 +1,3 @@
-# Keine Fremdpakete nötig - nur Python 3.9+ mit tkinter.
+# Oberflaeche (Qt). Ohne Admin-Rechte:  python -m pip install --user -r requirements.txt
+PySide6>=6.5
 # Nur zum Bauen einer .exe (optional): pyinstaller

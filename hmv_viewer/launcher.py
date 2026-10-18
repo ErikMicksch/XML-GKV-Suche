@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 import traceback
+from pathlib import Path
 
 
 def _prepare_streams():
@@ -13,51 +14,47 @@ def _prepare_streams():
         sys.stderr = open(os.devnull, "w")
 
 
-def _enable_dpi_awareness():
-    if sys.platform == "win32":   # scharfe Schrift auf hochauflösenden Monitoren
-        try:
-            import ctypes
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-        except Exception:
-            pass
-
-
 def _report_crash(exc_text):
     where = ""
     try:
+        import getpass
+        import tempfile
         from .config import default_db_path
-        log = default_db_path().parent / "fehler.log"
-        log.write_text(exc_text, encoding="utf-8")
+        name = f"fehler_{getpass.getuser()}.log"   # je Benutzer: mehrere Personen starten dieselbe .exe
+        for folder in (default_db_path().parent, Path(tempfile.gettempdir())):
+            try:
+                log = folder / name
+                log.write_text(exc_text, encoding="utf-8")
+                break
+            except OSError:
+                continue
         where = f"\n\nDetails in: {log}"
     except Exception:
         pass
     try:
-        import tkinter
-        from tkinter import messagebox
-        root = tkinter.Tk()
-        root.withdraw()
-        messagebox.showerror("HMV-Viewer – unerwarteter Fehler", exc_text[-1500:] + where)
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        QApplication.instance() or QApplication([])
+        QMessageBox.critical(None, "HMV-Viewer – unerwarteter Fehler", exc_text[-1500:] + where)
     except Exception:
         print(exc_text, file=sys.__stderr__ or sys.stderr)
 
 
-def _tk_missing_hint():
-    return ("tkinter ist in dieser Python-Installation nicht vorhanden.\n"
-            "Windows/macOS: Python von python.org installieren (tkinter ist dabei).\n"
-            "Linux:  sudo apt install python3-tk")
+def _qt_missing_hint():
+    return ("Für die Oberfläche wird PySide6 benötigt (einmalig, ohne Admin-Rechte):\n"
+            "    python -m pip install --user PySide6\n"
+            "Die Kommandozeile (import / export / versionen) funktioniert auch ohne.")
 
 
 def run() -> int:
-    _prepare_streams()
-    _enable_dpi_awareness()
+    _prepare_streams()   # DPI-Skalierung übernimmt Qt selbst
     try:
         from .__main__ import main
-        # GUI-Start ohne Argumente braucht tkinter -> freundliche Meldung statt Traceback
+        # GUI-Start ohne Argumente braucht PySide6 -> freundliche Meldung statt Traceback
         if len(sys.argv) == 1:
             try:
-                import tkinter  # noqa: F401
+                import PySide6  # noqa: F401
             except ImportError:
-                print(_tk_missing_hint())
+                print(_qt_missing_hint())
                 return 1
         return main() or 0
     except SystemExit as exc:

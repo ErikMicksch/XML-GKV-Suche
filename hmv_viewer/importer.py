@@ -115,8 +115,14 @@ def import_file(conn: sqlite3.Connection, path, *, force: bool = False,
     first = conn.execute("SELECT COUNT(*) FROM imports").fetchone()[0] == 0
     result = ImportResult(import_id=0, n_total=n_products, first_import=first, warnings=warnings)
 
-    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("BEGIN IMMEDIATE")   # wartet, falls gerade ein anderer Benutzer schreibt
     try:
+        # erneut prüfen: ein anderer Benutzer kann dieselbe Datei inzwischen importiert haben
+        row = conn.execute("SELECT id FROM imports WHERE source_sha256=?", (sha,)).fetchone()
+        if row and not force:
+            raise DuplicateImport(row["id"])
+        first = conn.execute("SELECT COUNT(*) FROM imports").fetchone()[0] == 0
+        result.first_import = first
         cur = conn.execute(
             "INSERT INTO imports(imported_at, source_name, source_sha256, source_date, logische_version, n_total)"
             " VALUES (?,?,?,?,?,?)",

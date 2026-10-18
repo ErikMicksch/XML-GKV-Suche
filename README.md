@@ -1,18 +1,20 @@
 # HMV-Viewer – Hilfsmittelverzeichnis (GKV-SV)
 
-Python-Projekt mit GUI (tkinter) zum Einsehen des Hilfsmittelverzeichnisses aus der `*_HMV.xml`,
+Python-Projekt mit moderner GUI (Qt / PySide6, Farbwelt angelehnt an die AOK) zum Einsehen des Hilfsmittelverzeichnisses aus der `*_HMV.xml`,
 mit **10-stelliger Hilfsmittelnummer**, **Versionshistorie** und **Excel-Export**.
 
-## Start – nur eine Python-Datei, keine Installation, keine Admin-Rechte
+## Start – eine Python-Datei, keine Admin-Rechte
 
-Die Datei **`hmv_viewer_app.py`** enthält die komplette Anwendung. Sie braucht nur Python 3.9+
-(tkinter ist bei den Python-Installern für Windows/macOS dabei; Linux: `sudo apt install python3-tk`) –
-**kein `pip`, keine zusätzlichen Pakete**. Python selbst lässt sich ohne Admin-Rechte installieren
-(python.org → „Install for current user“ bzw. Haken bei „Use admin privileges“ entfernen).
+Die Datei **`hmv_viewer_app.py`** enthält die komplette Anwendung. Sie braucht Python 3.9+ und einmalig
+das Paket **PySide6** für die Oberfläche (beides ohne Admin-Rechte installierbar; Python: python.org →
+„Install for current user“):
 
 ```
+python -m pip install --user PySide6
 python hmv_viewer_app.py          # Windows auch: Doppelklick auf die Datei oder start.bat
 ```
+
+Die Kommandozeile (siehe unten) funktioniert auch ohne PySide6. Endnutzer ohne Python bekommen die .exe.
 
 Beim ersten Start fragt das Programm nach der XML. Die Datei `20260831_HMV.xml` oder direkt die ZIP-Datei
 (`..._HMV.zip`) auswählen. Die Daten werden im Ordner `data` **neben der Datei** gespeichert
@@ -29,15 +31,36 @@ Alternativ direkt aus dem Quellordner: `python -m hmv_viewer` bzw. `python run_h
 ## Als .exe weitergeben (ohne Installation, ohne Admin-Rechte)
 
 Auf einem Windows-Rechner mit Python: **`build_exe.bat` doppelklicken** → `dist\HMV-Viewer.exe`.
-Diese einzelne Datei kann an Endnutzer weitergegeben werden (kein Python, keine Installation, keine Admin-Rechte):
+Diese einzelne Datei (ca. 60–100 MB, enthält Qt) kann an Endnutzer weitergegeben werden (kein Python, keine Installation, keine Admin-Rechte):
 
 * Die Datenbank wird im Ordner `data` **neben der .exe** angelegt (portabel, z. B. auf einem Netzlaufwerk oder
-  USB-Stick). Ist der Ordner nicht beschreibbar, wird `%LOCALAPPDATA%\HMV-Viewer` verwendet.
+  USB-Stick). Ist der Ordner nicht beschreibbar und gibt es dort noch keine Datenbank, wird `%LOCALAPPDATA%\HMV-Viewer` verwendet.
 * Beim Start entpackt sich die .exe kurz in den Temp-Ordner des Benutzers (erster Start ca. 3–10 s).
 * Die .exe ist nicht signiert: Windows SmartScreen kann „Weitere Informationen → Trotzdem ausführen“ anzeigen,
   Virenscanner melden bei PyInstaller-Dateien gelegentlich Fehlalarme. Abhilfe: Code-Signing-Zertifikat
   oder Freigabe durch die IT.
-* Bei einem unerwarteten Fehler erscheint ein Dialog und `data\fehler.log` wird geschrieben.
+* Bei einem unerwarteten Fehler erscheint ein Dialog und `data\fehler_<Windows-Benutzer>.log` wird geschrieben
+  (ohne Schreibrecht dort: im Temp-Ordner des Benutzers).
+
+### Mehrere Benutzer gleichzeitig über ein Netzlaufwerk
+
+`HMV-Viewer.exe` einmal auf das Netzlaufwerk legen (z. B. `\\server\abteilung\HMV\`); alle starten **dieselbe .exe**.
+
+* **Keine Adminrechte nötig – nie.** Die .exe läuft mit normalen Benutzerrechten (kein `--uac-admin`, Manifest
+  „asInvoker“). Geschrieben wird nur in den `data`-Ordner neben der .exe, in den eigenen Temp-Ordner,
+  in `HKCU\Software\HMV-Viewer` (Einstellungen je Windows-Benutzer) und in den selbst gewählten Favoriten-Ordner.
+* **Eine gemeinsame Datenbank** `data\hmv.db` neben der .exe für alle (Verzeichnis, Versionen, gemeinsame Listen und
+  Notizen, Benutzer). Sie läuft im Rollback-Journal-Modus (nicht WAL), der für Netzlaufwerke geeignet ist; ältere
+  Datenbanken werden beim Start automatisch umgestellt. Getestet: 8 gleichzeitige Prozesse (Import + Schreiben + Lesen)
+  über einen UNC-Pfad ohne Fehler, Integritätsprüfung ok.
+* **Jeder wählt seinen eigenen Benutzer** (Nachname) – gespeichert je Windows-Benutzer, wechselbar über den Namens-Button.
+  Persönliche Favoriten, private Listen, eigene Notizen und Kategorien liegen in der eigenen Favoriten-Datei.
+* Schreibt jemand gerade (z. B. ein Import), warten die anderen kurz; bei längerer Sperre erscheint ein Hinweis statt
+  eines Fehlers. Neue Importe anderer werden beim Zurückkehren ins Fenster automatisch übernommen.
+* Wer nur **Leserechte** auf den `data`-Ordner hat, kann alles ansehen und exportieren; die Statusleiste zeigt
+  „NUR LESEN“, Änderungen an gemeinsamen Daten werden mit einer klaren Meldung abgelehnt.
+* Grenzen: SQLite über Netzlaufwerk ist für eine Abteilung (einige bis ca. 20 gleichzeitige Benutzer) gedacht, nicht für
+  Hunderte. Während eines Imports (je nach Größe einige Sekunden bis Minuten) sind Schreibzugriffe anderer kurz blockiert.
 
 ## Die 10-stellige Hilfsmittelnummer
 
@@ -68,17 +91,113 @@ Dasselbe gilt für Gruppen, Anwendungsorte, Untergruppen und Produktarten (Reite
 Der **erste Import ist die Ausgangsbasis** (alles „Neu“, aber nicht farbig markiert).
 
 In der GUI:
-* **Produkte**: Hierarchiebaum links, Suche (Bezeichnung, Hersteller, Nummer, optional Merkmale),
-  Filter *Status* und *Änderung in Version/Typ*. Zeilen der letzten Version sind farbig markiert
-  (grün = neu, gelb = geändert, blau = wieder aufgenommen, rot = entfernt).
-  Unten: **Details** und **Historie** des gewählten Produkts mit Diff (alt/neu) je Feld.
-* **Versionen & Änderungen**: alle Importe mit Zählern; Auswahl zeigt die Änderungen der Version,
-  Doppelklick springt zum Produkt.
-* **Favoriten**: Produkte per Klick in die ★-Spalte, Strg+D, Rechtsklick oder Button im Detailbereich merken;
-  Gruppen/Orte/Untergruppen/Arten per Rechtsklick im Baum. Alles erscheint oben im Baum unter „★ Favoriten“
-  (Strg+B). Favoriten liegen in der Datenbank und bleiben bei neuen Importen erhalten.
-* **Schnellzugriff**: Filterfeld über dem Baum (Name oder Nummer, z. B. „10.50“), Gruppe/Art in den Details
-  anklicken springt dorthin, ↓ aus der Suche in die Trefferliste. Alle Tastenkürzel: Button *Tastenkürzel*.
+* **Produkte** (drei Spalten): links Produktgruppen mit Filterfeld (Name oder Nummer, z. B. „10.50“),
+  Mitte Trefferliste, rechts Details, Historie (Diff alt/neu je Feld) und **Meine Notiz**.
+  Suche oben (Bezeichnung, Hersteller, Nummer, optional Merkmale), Filter *Status*, *Änderung in Version/Typ*
+  und **Hersteller** (Teiltext genügt). Zeilen der letzten Version sind farbig markiert
+  (grün = neu, gelb = geändert, blau = wieder aufgenommen, rot = entfernt). Tooltip auf der Bezeichnung zeigt die Merkmale.
+* **Versionen**: alle Importe mit Zählern; Auswahl zeigt die Änderungen der Version, Doppelklick springt zum Produkt.
+* **Favoriten**: Produkte per Klick in die ★-Spalte, Strg+D, Rechtsklick oder Button im Detailbereich merken –
+  auch mehrere markierte Zeilen auf einmal; ganze Gruppen per Rechtsklick im Baum (als aufklappbarer Baum).
+  Alles erscheint oben im Baum unter „★ Meine Favoriten“ (Strg+B), dazu eigene private Listen (siehe unten).
+* **Arbeiten mit Produktlisten**: persönliche **Notiz** je Produkt (Spalte „Meine Notiz“, Doppelklick auf eine Zeile),
+  Klick auf Hersteller/Gruppe/Art in den Details filtert danach, **Zeilen als Tabelle kopieren** (Strg+A, Strg+C → in
+  Excel/E-Mail einfügen), Excel-Export „Meine Favoriten“ mit Notiz-Spalte. Nach einem Import werden
+  **betroffene Favoriten sofort angezeigt**.
+* **Notizen und Kommentare**: „Meine Notiz“ (nur für Sie) und **Kommentare** je Produkt (Reiter „Kommentare“ im
+  Detailbereich, in der Datenbank, für alle sichtbar, jeweils mit Name und Zeitpunkt; eigene Kommentare lassen sich
+  löschen). Beide erscheinen als Spalte, die große Suche findet beide, das Feld **„Notizen“** sucht nur darin.
+  Gemeinsame Notizen aus v2.2 werden beim Start automatisch zu Kommentaren.
+* **Farbkategorien**: eigene Kategorien mit Farbe (Vorgaben: Erledigt, In Prüfung, Kritisch; verwalten über
+  *Mehr ▾ → Farbkategorien*). Zuweisen per Rechtsklick → *Farbkategorie* (auch für viele Zeilen) oder im Detailbereich;
+  in der Liste zeigt ein kleines Farbfeld die Kategorie, Filter *Kategorie* zeigt nur diese Produkte, sortierbar.
+  Die Kategorien selbst liegen in der Favoriten-Datei; im Excel-Export als Spalte „Kategorie (persönlich)“.
+  Das Einfärben ist für Kollegen unter „Änderungen anderer“ sichtbar.
+* **Design**: *Mehr ▾ → Design* – **Classic** (AOK-Grün), **Hell** (neutral, weiß) oder **Dunkel**; wird je Benutzer gemerkt.
+* Alle Tastenkürzel: *Mehr ▾ → Tastenkürzel*. Fenstergröße und Spaltenbreiten werden je Benutzer gemerkt.
+
+### Neu in v2.3
+
+* **Startseite** (*Start*, Strg+0): Kacheln (Produkte, letzter Import, Favoriten, Listen), Diagramm der Änderungen je
+  Version, zuletzt angesehene Produkte, zuletzt geänderte gemeinsame Listen und Schnellaktionen.
+* **Schnellzugriff Strg+K**: ein Feld für Produkte, Nummern, Gruppen, Listen und alle Funktionen.
+* **Zuletzt angesehen**: die letzten 20 geöffneten Produkte als Eintrag oben im Baum (je Windows-Benutzer).
+* **Gespeicherte Suchen**: aktuelle Filterkombination unter einem Namen merken (Button über der Liste).
+* **Nummernliste einfügen** (Strg+Umschalt+V): viele Nummern aus Excel/E-Mail einfügen; zeigt aktive, entfernte und
+  unbekannte Nummern; Treffer anzeigen oder direkt zu einer Liste hinzufügen.
+* **Vergleich**: Rechtsklick auf ein Produkt → *Vergleichen mit …* → im Popup ein oder mehrere Produkte suchen und
+  wählen (ohne Suche werden Produkte derselben Produktart vorgeschlagen); oder 2–4 Produkte markieren → *vergleichen*.
+  Das Vergleichsfenster ist eine Tabelle: links die Eigenschaften (Abschnitte „Allgemein“ und „Merkmale“), je Produkt
+  eine Spalte, Unterschiede farbig; „Nur Unterschiede anzeigen“, „Weiteres Produkt hinzufügen“, „Als Tabelle kopieren“.
+* **Was ist neu?** beim Start: neue Importe (mit betroffenen Favoriten), Änderungen an abonnierten gemeinsamen
+  Listen, neue Kommentare anderer seit dem letzten Öffnen.
+* **Ziehen und Ablegen**: markierte Produkte mit der Maus auf „Meine Favoriten“ oder eine Liste im Baum ziehen.
+* **Spalten wählen und verschieben**: Rechtsklick auf den Tabellenkopf; Reihenfolge per Ziehen; wird gemerkt.
+* **Endlos scrollen** statt Seiten: weitere Treffer werden beim Scrollen nachgeladen.
+* **Rückgängig** (Strg+Z bzw. Button im Hinweis): für Favoriten-, Listen- und Kategorie-Änderungen.
+* **Kartenansicht** (Umschalter über der Liste) mit Status-Chips, Kategorie, Favorit und letztem Kommentar.
+* **Linien-Icons**, **Hinweis-Einblendungen** unten rechts, sanfte Übergänge, Leer-Zustände mit Grafik und klarer Aktion.
+* **Detailbereich** mit Titel, Chips und aufklappbaren Abschnitten (Einordnung, Merkmale, Listen).
+* **Ansicht**: *Mehr ▾ → Ansicht* – Zeilenhöhe (Kompakt/Normal/Groß) und Schriftgröße (9–12 pt), je Benutzer.
+* **Verlauf je gemeinsamer Liste** (Rechtsklick → *Verlauf anzeigen*): wer hat wann was hinzugefügt/entfernt/umbenannt.
+* **Abonnieren** gemeinsamer Listen (Rechtsklick): Glocke im Baum, Hinweis bei Änderungen anderer.
+* **Automatische Tagessicherung**: beim ersten Start des Tages still nach `data\sicherungen\auto_JJJJMMTT.db`
+  (die letzten 14 bleiben); entfällt bei Nur-Lese-Zugriff.
+* **Info & Support** (*Mehr ▾*): Version, Pfade, Benutzer, Journal-Modus – „Fehlerbericht kopieren“ für den Support.
+* **Änderungen anderer** (linke Leiste unter *Versionen*, Strg+3): alles, was andere Benutzer kommentiert, farblich
+  markiert oder an gemeinsamen Listen geändert haben – mit Zeitpunkt, Name, Produkt und Inhalt; filterbar nach
+  Zeitraum, Art und Benutzer; Doppelklick öffnet Produkt bzw. Liste. Eigene Änderungen sind ausgeblendet (Schalter
+  „Eigene Änderungen auch anzeigen“); ist die Ansicht leer, erklärt ein Hinweis den Grund. Der Button zeigt die Zahl neuer Einträge seit dem
+  letzten Öffnen. Hinweis: Die Farbkategorien bleiben Ihre eigenen, das **Einfärben** eines Produkts wird aber in der
+  gemeinsamen Datenbank protokolliert und ist für Kollegen hier sichtbar.
+
+### Listen: Meine Favoriten, private und gemeinsame Listen
+
+Im Baum links gibt es zwei Bereiche, in beiden lassen sich **Listen in Listen** (Unterlisten, beliebig tief) anlegen:
+
+* **★ Meine Favoriten** – nur für Sie (Favoriten-Datei). Rechtsklick → *Neue private Liste*, auf einer Liste →
+  *Unterliste anlegen / Umbenennen / Löschen*.
+* **Gemeinsame Listen** – in der Datenbank, für alle Benutzer sichtbar (mit Windows-Benutzername und Zeitpunkt).
+  Gleiche Bedienung; Löschen mit Rückfrage, gilt für alle. Änderungen anderer erscheinen beim Zurückkehren ins Fenster / F5.
+
+**Hinzufügen** per Rechtsklick → *Zu Liste hinzufügen …*: Der Dialog zeigt alle Listen als Baum (auch „Neue Liste hier“).
+Bei einer **Produktgruppe** (Rechtsklick links im Baum auf Gruppe, Ort, Untergruppe oder Art) fragt der Dialog:
+
+* **Ganze Produktgruppe** – die Gruppe erscheint in der Liste als **aufklappbarer Baum**; neue Produkte der Gruppe
+  gehören bei späteren Importen automatisch dazu.
+* **Einzelne Produkte** – alle aktiven Produkte werden einzeln eingetragen (fester Stand; ab 500 mit Rückfrage).
+
+*☆ Ganze Gruppe zu Meine Favoriten* (Rechtsklick) merkt eine Gruppe direkt als Baum. In der ★-Spalte steht ★ für direkt
+gemerkte Produkte und ☆ für Produkte, die über eine ganze Gruppe Favorit sind. Eine Liste zeigt beim Anklicken ihre
+eigenen Produkte inkl. der Produkte ihrer Gruppen (nicht die der Unterlisten). Entfernen: Produkte markieren →
+Rechtsklick → *aus „Liste“ entfernen*; Gruppen-Einträge per Rechtsklick auf die Gruppe im Baum. Die Details eines
+Produkts zeigen, in welchen gemeinsamen und eigenen Listen es steht. Excel-Export einer Liste: Liste auswählen →
+*Excel-Export* → „Aktuelle Auswahl“.
+
+### Benutzer
+
+Beim ersten Start wählt jeder seinen **Nachnamen** aus oder legt ihn neu an (kein Passwort). Wechseln/anlegen über den
+Namens-Button oben rechts. Der Name wird bei gemeinsamen Listen und gemeinsamen Notizen als „zuletzt geändert von
+… am …“ angezeigt (Tooltip der Liste, Statusleiste, unter der gemeinsamen Notiz, Excel-Export). Es ist keine
+Zugriffskontrolle – jeder kann jeden Namen wählen.
+
+### Datenbank sichern und im Notfall wiederherstellen
+
+*Mehr ▾ → Datenbank sichern (Backup)* schreibt eine konsistente Kopie der gemeinsamen Datenbank (auch während andere
+arbeiten). *Mehr ▾ → Datenbank aus Sicherung wiederherstellen* **überschreibt ALLE Informationen der gemeinsamen
+Datenbank für alle Benutzer und ist nur für den Notfall gedacht**: deutliche Warnung, Prüfung der Datei, Bestätigung durch
+Eintippen von `ÜBERSCHREIBEN`; der vorherige Stand wird automatisch unter `data\sicherungen\` gesichert.
+Persönliche Favoriten, private Listen, Notizen und Kategorien liegen in der eigenen Favoriten-Datei und sind weder
+in der Sicherung enthalten noch von der Wiederherstellung betroffen.
+
+### Persönliche Favoriten & Notizen
+
+Jeder Benutzer hat eine eigene Datei **`HMV_Favoriten.json`** in einem selbst gewählten Ordner (Abfrage beim ersten
+Start, Vorschlag `Dokumente\HMV-Viewer`; ändern über *Mehr ▾ → Speicherort*). Der gewählte Ordner wird je
+Windows-Benutzer gemerkt (Registry `HKCU\Software\HMV-Viewer`). Ein Ordner auf dem Netzlaufwerk bleibt beim
+PC-Wechsel erhalten. Die Datenbank mit dem Verzeichnis bleibt gemeinsam. Die Datei wird atomar geschrieben;
+eine beschädigte Datei wird als `HMV_Favoriten.defekt_<Zeit>.json` gesichert statt überschrieben.
+Favoriten aus v1.x (gemeinsam in der Datenbank) werden beim ersten Start einmalig übernommen.
 
 Importiert man dieselbe Datei zweimal, erkennt das Programm das (SHA-256) und fragt nach.
 Enthält eine neue XML weniger als 50 % der bisherigen Produkte, wird vor dem Import gewarnt
@@ -86,7 +205,8 @@ Enthält eine neue XML weniger als 50 % der bisherigen Produkte, wird vor dem Im
 
 ## Excel-Export
 
-Button *Nach Excel exportieren …*: aktuelle Auswahl / alle aktiven / alle inkl. entfernter Produkte.
+Button *Excel-Export*: aktuelle Auswahl / meine Favoriten / alle aktiven / alle inkl. entfernter Produkte,
+optional mit den Spalten „Favorit“ und „Notiz (persönlich)“. Nach dem Export kann die Datei direkt geöffnet werden.
 Blätter: **Produkte** (10-Steller als Text mit führender Null, formatierte Nummer, Hierarchie, Merkmale,
 Datumsfelder als echte Daten, Version/Typ der letzten Änderung, farbig), **Änderungshistorie**
 (Feld, alter Wert, neuer Wert je Version) und **Versionen**. Die .xlsx wird ohne Zusatzpakete selbst geschrieben.
@@ -109,9 +229,11 @@ hmv_viewer/importer.py   Import + Diff + Versionierung
 hmv_viewer/queries.py    Filter, Suche, Historie, Hierarchie
 hmv_viewer/exporter.py   Excel-Export (Inhalt)
 hmv_viewer/xlsx.py       XLSX-Schreiber ohne Fremdpakete
-hmv_viewer/launcher.py   gemeinsamer Start (Fehlerdialog, DPI)
+hmv_viewer/launcher.py   gemeinsamer Start (Fehlerdialog)
+hmv_viewer/favorites.py  persönliche Favoriten & Notizen (JSON-Datei je Benutzer)
 tools/build_single_file.py  erzeugt hmv_viewer_app.py
 hmv_viewer_app.py        fertige Einzeldatei
-hmv_viewer/gui.py        tkinter-Oberfläche
+hmv_viewer/gui.py        Qt-Oberfläche (PySide6)
+hmv_viewer/ui_extras.py  Icons, Startseite, Karten, Schnellzugriff, Dialoge
 tests/                   python -m unittest discover -s tests
 ```

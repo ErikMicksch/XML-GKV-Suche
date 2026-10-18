@@ -95,11 +95,191 @@ class ImportTests(unittest.TestCase):
         key = {"gruppe": 1, "ort": 24, "untergruppe": 1, "art": 0}
         self.assertEqual(queries.favorite_key(key), "0124010")
         self.assertEqual(queries.key_from_prefix("0124010"), key)
-        self.assertTrue(queries.toggle_favorite(self.conn, "0124010002"))
-        self.assertTrue(queries.toggle_favorite(self.conn, "0124"))
-        self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(favoriten=True)), 1)
-        self.assertFalse(queries.toggle_favorite(self.conn, "0124010002"))
-        self.assertEqual(queries.favorites(self.conn), {"0124"})
+        from hmv_viewer.favorites import FILE_NAME, FavoriteStore
+        folder = os.path.join(self.tmp, "favs")
+        store = FavoriteStore(folder)
+        self.assertTrue(store.toggle("0124010002"))
+        self.assertTrue(store.toggle("0124"))
+        store.attach(self.conn)
+        # ganze Gruppe 0124 ist Favorit -> alle 4 aktiven Produkte darin zählen dazu
+        self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(favoriten=True)), 4)
+        self.assertFalse(store.toggle("0124010002"))
+        store.set_note("0124010003", " Hinweis notiert ")
+        again = FavoriteStore(folder)
+        self.assertEqual(set(again.favs), {"0124"})
+        self.assertEqual(again.notes, {"0124010003": "Hinweis notiert"})
+        # kaputte Datei wird gesichert, nicht überschrieben
+        with open(os.path.join(folder, FILE_NAME), "w", encoding="utf-8") as fh:
+            fh.write("{kaputt")
+        broken = FavoriteStore(folder)
+        self.assertEqual(broken.favs, {})
+        self.assertTrue(broken.recovered.exists())
+
+    def test_shared_lists(self):
+        import sqlite3
+        importer.import_file(self.conn, self.v1)
+        lid = queries.create_list(self.conn, "Pumpen Liste", "anna")
+        with self.assertRaises(sqlite3.IntegrityError):
+            queries.create_list(self.conn, "pumpen liste", "bob")      # Name eindeutig (ohne Groß/klein)
+        self.assertEqual(queries.add_to_list(self.conn, lid, ["0124010001", "0124010003"], "anna"), 2)
+        self.assertEqual(queries.add_to_list(self.conn, lid, ["0124010001"], "bob"), 0)   # schon drin
+        self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(liste_id=lid)), 2)
+        # zweite Verbindung (= anderer Benutzer) sieht die Liste
+        other = db.connect(os.path.join(self.tmp, "t.db"))
+        self.assertEqual([r["n"] for r in queries.list_lists(other)], [2])
+        other.close()
+        self.assertEqual([r["name"] for r in queries.lists_for_product(self.conn, "0124010001")], ["Pumpen Liste"])
+        self.assertEqual(queries.remove_from_list(self.conn, lid, ["0124010003"]), 1)
+        queries.rename_list(self.conn, lid, "Pumpen 2027")
+        queries.delete_list(self.conn, lid)
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM liste_eintrag").fetchone()[0], 0)   # Kaskade
+
+    def test_nested_lists_and_migration(self):
+        import sqlite3
+        # Datenbank im Format v2.0 (Liste ohne parent_id) wird ohne Datenverlust umgestellt
+        path = os.path.join(self.tmp, "alt.db")
+        old = sqlite3.connect(path)
+        old.executescript("CREATE TABLE liste(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE COLLATE NOCASE,"
+                          " created_by TEXT, created_at TEXT);"
+                          "CREATE TABLE liste_eintrag(liste_id INTEGER NOT NULL REFERENCES liste(id) ON DELETE CASCADE,"
+                          " nummer TEXT NOT NULL, added_by TEXT, added_at TEXT, PRIMARY KEY(liste_id, nummer));"
+                          "INSERT INTO liste VALUES(1, 'Alt', 'anna', '2026-10-01');"
+                          "INSERT INTO liste_eintrag VALUES(1, '0124010001', 'anna', '2026-10-01');")
+        old.close()
+        conn = db.connect(path)
+        self.assertEqual([(r["name"], r["parent_id"], r["n"]) for r in queries.list_lists(conn)], [("Alt", None, 1)])
+        sub = queries.create_list(conn, "Alt", "bob", parent_id=1)          # gleicher Name auf anderer Ebene erlaubt
+        queries.add_to_list(conn, sub, ["01"], "bob")                       # ganze Gruppe
+        importer.import_file(conn, self.v1)
+        self.assertEqual(queries.count_products(conn, queries.ProductFilter(liste_id=sub)), 4)
+        self.assertEqual(queries.list_groups(conn, sub), ["01"])
+        self.assertIn("Alt", [r["name"] for r in queries.lists_for_product(conn, "0124010003")])  # über Gruppe
+        queries.delete_list(conn, 1)                                        # Unterliste + Einträge per Kaskade
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM liste").fetchone()[0], 0)
+        self.assertEqual(conn.execute("SELECT COUNT(*) FROM liste_eintrag").fetchone()[0], 0)
+        conn.close()
+
+    def test_network_safe_journal_mode(self):
+        import sqlite3
+        # ältere Datenbanken (WAL) werden auf das netzlaufwerk-taugliche Rollback-Journal umgestellt
+        path = os.path.join(self.tmp, "wal.db")
+        old = sqlite3.connect(path)
+        old.execute("PRAGMA journal_mode=WAL")
+        old.close()
+        conn = db.connect(path)
+        self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0], "delete")
+        self.assertFalse(db.is_read_only(path))
+        conn.close()
+
+    def test_backup_restore_and_shared_notes(self):
+        importer.import_file(self.conn, self.v1)
+        self.assertEqual(queries.create_user(self.conn, "  Meier "), "Meier")
+        self.assertEqual(queries.create_user(self.conn, "meier"), "Meier")          # gleicher Name, keine Dublette
+        with self.assertRaises(ValueError):
+            queries.create_user(self.conn, "   ")
+        cid = queries.add_comment(self.conn, "0124010001", "Rückruf erledigt", "Meier")
+        self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(notiz_text="rückruf")), 1)
+        self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(text="rückruf")), 1)
+        lid = queries.create_list(self.conn, "L", "Meier")
+        queries.add_to_list(self.conn, lid, ["0124010001"], "Schulz")
+        self.assertEqual(queries.list_lists(self.conn)[0]["changed_by"], "Schulz")
+
+        backup = os.path.join(self.tmp, "sicherung.db")
+        queries.backup_db(self.conn, backup)
+        self.assertEqual(queries.check_backup(backup), {"versionen": 1, "produkte": 4, "listen": 1})
+        queries.delete_list(self.conn, lid)
+        self.assertEqual(queries.delete_comment(self.conn, cid, "Schulz"), 0)    # fremde Kommentare bleiben
+        self.assertEqual(queries.delete_comment(self.conn, cid, "Meier"), 1)
+        queries.restore_db(self.conn, backup)
+        db.ensure_schema(self.conn)
+        self.assertEqual([c["text"] for c in queries.comments_for(self.conn, "0124010001")], ["Rückruf erledigt"])
+        self.assertEqual([r["name"] for r in queries.list_lists(self.conn)], ["L"])
+        with open(os.path.join(self.tmp, "kein.db"), "w") as fh:
+            fh.write("keine Datenbank")
+        with self.assertRaises(ValueError):
+            queries.check_backup(os.path.join(self.tmp, "kein.db"))
+
+    def test_comments_log_and_number_filter(self):
+        import sqlite3
+        # v2.2-Datenbank mit gemeinsamer Notiz -> wird zum ersten Kommentar
+        path = os.path.join(self.tmp, "v22.db")
+        old = sqlite3.connect(path)
+        old.executescript("CREATE TABLE notiz_gemeinsam(nummer TEXT PRIMARY KEY, text TEXT NOT NULL, changed_by TEXT,"
+                          " changed_at TEXT); INSERT INTO notiz_gemeinsam VALUES('0124010001', 'alt', 'Meier', '2026-10-01T10:00:00');")
+        old.close()
+        conn = db.connect(path)
+        importer.import_file(conn, self.v1)
+        self.assertEqual([(c["text"], c["user"]) for c in queries.comments_for(conn, "0124010001")], [("alt", "Meier")])
+        queries.add_comment(conn, "0124010001", "neu", "Schulz")
+        self.assertEqual(queries.comment_summary(conn)["0124010001"][0], 2)
+        self.assertEqual(len(queries.comments_since(conn, "2026-10-02", "Meier")), 1)
+        with self.assertRaises(ValueError):
+            queries.add_comment(conn, "0124010001", "  ", "Meier")
+        # Verlauf einer gemeinsamen Liste
+        lid = queries.create_list(conn, "L", "Meier")
+        queries.add_to_list(conn, lid, ["0124010001", "0124"], "Schulz")
+        queries.remove_from_list(conn, lid, ["0124"], "Meier")
+        queries.rename_list(conn, lid, "L2", "Meier")
+        self.assertEqual([r["aktion"] for r in queries.list_log(conn, lid)], ["umbenannt", "entfernt", "hinzugefügt", "angelegt"])
+        # Nummern-Filter (zuletzt angesehen / eingefügte Nummernliste)
+        f = queries.ProductFilter(status="alle", nummern=("0124010003", "9999999999"))
+        self.assertEqual([r["nummer"] for r in queries.fetch_products(conn, f)], ["0124010003"])
+        conn.close()
+
+    def test_others_activity(self):
+        importer.import_file(self.conn, self.v1)
+        queries.add_comment(self.conn, "0124010001", "von Schulz", "Schulz")
+        queries.add_comment(self.conn, "0124010003", "von mir", "Meier")
+        queries.log_activity(self.conn, "Schulz", "kategorie", ["0124010004"], "Kritisch", "#D64541")
+        lid = queries.create_list(self.conn, "Liste Schulz", "Schulz")
+        rows = queries.others_activity(self.conn, "Meier")
+        self.assertEqual({r["art"] for r in rows}, {"kommentar", "kategorie", "liste"})
+        self.assertNotIn("von mir", [r["detail"] for r in rows])                     # eigene Einträge nicht
+        self.assertEqual([r["bezeichnung"] is not None for r in rows if r["art"] == "kategorie"], [True])
+        self.assertEqual([r["liste_id"] for r in rows if r["art"] == "liste"], [lid])
+        self.assertEqual(len(queries.others_activity(self.conn, "Meier", kind="kommentar")), 1)
+        # jede Art einzeln liefert dieselben Spaltennamen (erster Teil der UNION bestimmt sie)
+        self.assertEqual(queries.others_activity(self.conn, "Meier", kind="kategorie")[0]["detail"], "Kritisch")
+        self.assertEqual(queries.others_activity(self.conn, "Meier", kind="liste")[0]["liste_id"], lid)
+        self.assertEqual(queries.others_activity(self.conn, "Meier", user="Niemand"), [])
+        self.assertEqual(queries.others_activity(self.conn, "Meier", since="2999-01-01"), [])
+
+    def test_private_nested_lists(self):
+        from hmv_viewer.favorites import FavoriteStore
+        importer.import_file(self.conn, self.v1)
+        store = FavoriteStore(os.path.join(self.tmp, "favs"))
+        top = store.create_plist("Projekte")
+        sub = store.create_plist("Pumpen", parent=top)
+        with self.assertRaises(ValueError):
+            store.create_plist("pumpen", parent=top)                       # Name je Ebene eindeutig
+        store.add_to_plist(sub, ["0124", "0124010001"])
+        store.attach(self.conn)
+        self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(pliste_id=sub)), 4)
+        again = FavoriteStore(os.path.join(self.tmp, "favs"))
+        self.assertEqual(again.plists[sub]["parent"], top)
+        again.delete_plist(top)                                             # samt Unterliste
+        self.assertEqual(again.plists, {})
+
+    def test_notes_search_and_categories(self):
+        from hmv_viewer.favorites import FavoriteStore
+        importer.import_file(self.conn, self.v1)
+        store = FavoriteStore(os.path.join(self.tmp, "favs"))
+        self.assertEqual(len(store.categories), 3)                      # Vorgaben für neue Benutzer
+        store.set_note("0124010003", "Lager Süd")
+        cid = store.add_category("Projekt X", "#123456")
+        store.set_mark(["0124010001", "0124010004"], cid)
+        store.attach(self.conn)
+        self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(text="lager")), 1)
+        self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(kategorie=cid)), 2)
+        again = FavoriteStore(os.path.join(self.tmp, "favs"))
+        self.assertEqual(again.categories[cid], {"name": "Projekt X", "farbe": "#123456"})
+        again.delete_category(cid)                                         # Markierungen verschwinden mit
+        self.assertEqual(again.marks, {})
+
+    def test_hersteller_filter(self):
+        importer.import_file(self.conn, self.v1)
+        self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(hersteller="muster gm")), 2)
+        self.assertIn("Muster GmbH", queries.list_hersteller(self.conn))
 
     def test_excel_export(self):
         import xml.etree.ElementTree as ET

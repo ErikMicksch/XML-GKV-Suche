@@ -1,6 +1,7 @@
-"""Lese-Abfragen für GUI und Export."""
+"""Abfragen für GUI und Export (inkl. Schreibzugriffe für gemeinsame Listen)."""
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 import sqlite3
@@ -18,6 +19,7 @@ ORDER_COLUMNS = {
     "aenderung": "p.aenderungsdatum",
     "version": "p.last_import_change",
     "fav": "p.nummer IN (SELECT k FROM favorit)",
+    "kat": "(SELECT kat FROM markierung WHERE k=p.nummer) IS NULL, (SELECT kat FROM markierung WHERE k=p.nummer)",
 }
 
 
@@ -33,10 +35,29 @@ class ProductFilter:
     import_id: int | None = None   # nur Produkte, die in dieser Version eine Änderung hatten
     change_type: str | None = None  # NEU | GEAENDERT | ENTFERNT | REAKTIVIERT
     favoriten: bool = False        # nur als Favorit markierte Produkte
+    hersteller: str = ""           # Teiltext im Herstellernamen
+    liste_id: int | None = None    # nur Produkte dieser gemeinsamen Liste
+    kategorie: str | None = None   # nur Produkte mit dieser persönlichen Farbkategorie
+    pliste_id: str | None = None   # nur Produkte dieser privaten Liste (Favoriten-Datei)
+    notiz_text: str = ""           # nur Produkte, deren eigene Notiz oder Kommentare diese Wörter enthalten
+    nummern: tuple | None = None   # nur diese Produktnummern (z. B. „Zuletzt angesehen“, eingefügte Nummernliste)
 
 
 def _like(term: str) -> str:
     return "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _member(source_sql: str) -> str:
+    """Produkt gehört zu einer Liste: direkt eingetragen oder über eine eingetragene ganze Gruppe (Präfix).
+
+    source_sql liefert die Einträge (Spalte k) und enthält höchstens einen Parameter -> Aufrufer übergibt ihn 2x.
+    """
+    return (f"(p.nummer IN ({source_sql}) OR EXISTS (SELECT 1 FROM ({source_sql}) g"
+            f" WHERE length(g.k) < 10 AND substr(p.nummer, 1, length(g.k)) = g.k))")
+
+
+_NOTE_CLAUSE = ("(p.nummer IN (SELECT k FROM notiz WHERE fold(text) LIKE ? ESCAPE '\\')"
+                " OR p.nummer IN (SELECT nummer FROM kommentar WHERE fold(text) LIKE ? ESCAPE '\\'))")
 
 
 def _build(f: ProductFilter):
@@ -53,7 +74,19 @@ def _build(f: ProductFilter):
         params.append(f.change_type)
 
     if f.favoriten:
-        where.append("p.nummer IN (SELECT k FROM favorit)")
+        where.append(_member("SELECT k FROM favorit"))
+    if f.pliste_id is not None:
+        where.append(_member("SELECT k FROM pliste WHERE liste=?"))
+        params += [f.pliste_id] * 2
+    if f.nummern is not None:
+        where.append("p.nummer IN (SELECT value FROM json_each(?))")
+        params.append(json.dumps(list(f.nummern)))
+    if f.kategorie is not None:
+        where.append("p.nummer IN (SELECT k FROM markierung WHERE kat=?)")
+        params.append(f.kategorie)
+    if f.liste_id is not None:
+        where.append(_member("SELECT nummer AS k FROM liste_eintrag WHERE liste_id=?"))
+        params += [f.liste_id] * 2
     if f.status == "aktiv":
         where.append("p.active=1")
     elif f.status == "entfernt":
@@ -65,8 +98,18 @@ def _build(f: ProductFilter):
             where.append(f"p.{col}=?")
             params.append(v)
 
+    if f.hersteller.strip():
+        where.append("fold(p.hersteller) LIKE ? ESCAPE '\\'")
+        params.append(_like(f.hersteller.strip().casefold()))
+
+    for term in f.notiz_text.split():
+        where.append(_NOTE_CLAUSE)
+        params += [_like(term.casefold())] * 2
+
     for term in f.text.split():
         clauses = ["fold(p.bezeichnung) LIKE ? ESCAPE '\\'", "fold(p.hersteller) LIKE ? ESCAPE '\\'"]
+        params += [_like(term.casefold())] * 2
+        clauses.append(_NOTE_CLAUSE)   # eigene und gemeinsame Notizen
         params += [_like(term.casefold())] * 2
         if f.in_merkmale:
             clauses.append("fold(p.merkmale) LIKE ? ESCAPE '\\'")
@@ -109,6 +152,12 @@ def iter_products(conn, f: ProductFilter, batch: int = 2000) -> Iterator[sqlite3
         if not rows:
             return
         yield from rows
+
+
+def list_hersteller(conn) -> list[str]:
+    return [r[0] for r in conn.execute(
+        "SELECT DISTINCT hersteller FROM produkt WHERE active=1 AND hersteller IS NOT NULL AND hersteller<>''"
+        " ORDER BY hersteller COLLATE NOCASE")]
 
 
 def get_product(conn, nummer: str):
@@ -189,7 +238,7 @@ def version_changes(conn, import_id: int, change_type: str | None = None, limit:
 
 
 # ----------------------------------------------------------------------------------------------
-# Favoriten (Produkte und Hierarchie-Knoten, gespeichert als Nummern-Präfix)
+# Favoriten-Schlüssel (Produkte und Hierarchie-Knoten als Nummern-Präfix, Speicherung: favorites.py)
 _PREFIX_PARTS = (("gruppe", 0, 2), ("ort", 2, 4), ("untergruppe", 4, 6), ("art", 6, 7))
 
 
@@ -202,16 +251,220 @@ def key_from_prefix(k: str) -> dict:
     return {c: int(k[a:b]) for c, a, b in _PREFIX_PARTS if len(k) >= b}
 
 
-def favorites(conn) -> set[str]:
-    return {r[0] for r in conn.execute("SELECT k FROM favorit")}
+# ----------------------------------------------------------------------------------------------
+# Gemeinsame Listen (in der Datenbank, für alle Benutzer sichtbar)
+def _now():
+    return dt.datetime.now().isoformat(timespec="seconds")
 
 
-def toggle_favorite(conn, k: str) -> bool:
-    """Schaltet den Favoriten um; True = jetzt Favorit."""
-    if conn.execute("DELETE FROM favorit WHERE k=?", (k,)).rowcount:
-        return False
-    conn.execute("INSERT INTO favorit(k, added_at) VALUES(?, datetime('now', 'localtime'))", (k,))
-    return True
+def list_lists(conn) -> list[sqlite3.Row]:
+    """Alle Listen mit n = Anzahl Einzelprodukte; parent_id für die Verschachtelung."""
+    return conn.execute(
+        "SELECT l.*, (SELECT COUNT(*) FROM liste_eintrag e WHERE e.liste_id=l.id AND length(e.nummer)=10) AS n"
+        " FROM liste l ORDER BY l.name COLLATE NOCASE").fetchall()
+
+
+def list_groups(conn, liste_id: int) -> list[str]:
+    """Als ganze Gruppe eingetragene Präfixe einer Liste."""
+    return [r[0] for r in conn.execute("SELECT nummer FROM liste_eintrag WHERE liste_id=? AND length(nummer)<10"
+                                       " ORDER BY nummer", (liste_id,))]
+
+
+def create_list(conn, name: str, user: str, parent_id: int | None = None) -> int:
+    """Legt eine (Unter-)Liste an; gleicher Name auf derselben Ebene -> sqlite3.IntegrityError."""
+    name = name.strip()
+    if not name:
+        raise ValueError("Bitte einen Namen angeben.")
+    now = _now()
+    lid = conn.execute("INSERT INTO liste(parent_id, name, created_by, created_at, changed_by, changed_at)"
+                       " VALUES(?, ?, ?, ?, ?, ?)", (parent_id, name, user, now, user, now)).lastrowid
+    _log(conn, lid, "angelegt", name, user)
+    return lid
+
+
+def _log(conn, liste_id: int, aktion: str, detail: str, user: str | None):
+    conn.execute("INSERT INTO liste_log(liste_id, aktion, detail, user, at) VALUES(?, ?, ?, ?, ?)",
+                 (liste_id, aktion, detail, user, _now()))
+
+
+def _describe(keys) -> str:
+    keys = list(keys)
+    shown = ", ".join(format_nummer(k) if len(k) == 10 else f"Gruppe {k}" for k in keys[:8])
+    return shown + (f" … (+{len(keys) - 8})" if len(keys) > 8 else "")
+
+
+def list_log(conn, liste_id: int, limit: int = 500) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM liste_log WHERE liste_id=? ORDER BY id DESC LIMIT ?", (liste_id, limit)).fetchall()
+
+
+def _touch_list(conn, liste_id: int, user: str | None):
+    conn.execute("UPDATE liste SET changed_by=?, changed_at=? WHERE id=?", (user, _now(), liste_id))
+
+
+def rename_list(conn, liste_id: int, name: str, user: str | None = None):
+    if not name.strip():
+        raise ValueError("Bitte einen Namen angeben.")
+    conn.execute("UPDATE liste SET name=? WHERE id=?", (name.strip(), liste_id))
+    _touch_list(conn, liste_id, user)
+    _log(conn, liste_id, "umbenannt", name.strip(), user)
+
+
+def delete_list(conn, liste_id: int):
+    conn.execute("DELETE FROM liste WHERE id=?", (liste_id,))   # Unterlisten und Einträge per ON DELETE CASCADE
+
+
+def add_to_list(conn, liste_id: int, nummern, user: str) -> int:
+    before = conn.total_changes
+    conn.executemany("INSERT OR IGNORE INTO liste_eintrag(liste_id, nummer, added_by, added_at) VALUES(?, ?, ?, ?)",
+                     [(liste_id, n, user, _now()) for n in nummern])
+    n = conn.total_changes - before
+    if n:
+        _touch_list(conn, liste_id, user)
+        _log(conn, liste_id, "hinzugefügt", f"{n}: {_describe(nummern)}", user)
+    return n
+
+
+def remove_from_list(conn, liste_id: int, nummern, user: str | None = None) -> int:
+    before = conn.total_changes
+    conn.executemany("DELETE FROM liste_eintrag WHERE liste_id=? AND nummer=?", [(liste_id, n) for n in nummern])
+    n = conn.total_changes - before
+    if n:
+        _touch_list(conn, liste_id, user)
+        _log(conn, liste_id, "entfernt", f"{n}: {_describe(nummern)}", user)
+    return n
+
+
+def recent_lists(conn, limit: int = 8) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM liste ORDER BY COALESCE(changed_at, created_at) DESC LIMIT ?", (limit,)).fetchall()
+
+
+# ----------------------------------------------------------------------------------------------
+# Benutzer (nur Nachname) und gemeinsame Notizen
+def list_users(conn) -> list[str]:
+    return [r[0] for r in conn.execute("SELECT name FROM benutzer ORDER BY name COLLATE NOCASE")]
+
+
+def create_user(conn, name: str) -> str:
+    """Legt einen Benutzer an (falls neu) und gibt den gespeicherten Namen zurück."""
+    name = " ".join(name.split())
+    if not name or len(name) > 60:
+        raise ValueError("Bitte einen Nachnamen mit höchstens 60 Zeichen angeben.")
+    conn.execute("INSERT OR IGNORE INTO benutzer(name, created_at) VALUES(?, ?)", (name, _now()))
+    return conn.execute("SELECT name FROM benutzer WHERE name=?", (name,)).fetchone()[0]
+
+
+def add_comment(conn, nummer: str, text: str, user: str) -> int:
+    text = text.strip()
+    if not text:
+        raise ValueError("Bitte einen Text eingeben.")
+    return conn.execute("INSERT INTO kommentar(nummer, text, user, at) VALUES(?, ?, ?, ?)",
+                        (nummer, text, user, _now())).lastrowid
+
+
+def comments_for(conn, nummer: str) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM kommentar WHERE nummer=? ORDER BY id", (nummer,)).fetchall()
+
+
+def delete_comment(conn, comment_id: int, user: str) -> int:
+    """Löscht einen eigenen Kommentar; gibt 0 zurück, wenn er von jemand anderem stammt."""
+    return conn.execute("DELETE FROM kommentar WHERE id=? AND user=?", (comment_id, user)).rowcount
+
+
+def comment_summary(conn) -> dict[str, tuple]:
+    """Produktnummer -> (Anzahl, letzter Kommentar als Row)."""
+    out = {}
+    for r in conn.execute("SELECT k.*, c.n FROM kommentar k JOIN (SELECT nummer, MAX(id) AS last, COUNT(*) AS n"
+                          " FROM kommentar GROUP BY nummer) c ON c.last = k.id"):
+        out[r["nummer"]] = (r["n"], r)
+    return out
+
+
+def comments_since(conn, since: str, not_by: str | None) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM kommentar WHERE at > ? AND COALESCE(user, '') <> COALESCE(?, '') ORDER BY id DESC",
+                        (since, not_by)).fetchall()
+
+
+def log_activity(conn, user: str, art: str, nummern, detail: str, farbe: str | None = None):
+    now = _now()
+    conn.executemany("INSERT INTO aktivitaet(at, user, art, nummer, detail, farbe) VALUES(?, ?, ?, ?, ?, ?)",
+                     [(now, user, art, n, detail, farbe) for n in nummern])
+
+
+ACTIVITY_KINDS = {"kommentar": "Kommentar", "kategorie": "Farbkategorie", "liste": "Gemeinsame Liste"}
+
+
+def others_activity(conn, me: str | None, since: str = "", kind: str | None = None, user: str | None = None,
+                    limit: int = 2000) -> list[sqlite3.Row]:
+    """Was andere Benutzer getan haben: Kommentare, Farbmarkierungen, Änderungen an gemeinsamen Listen (neueste zuerst)."""
+    parts, params = [], []
+    if kind in (None, "kommentar"):
+        parts.append("SELECT 'kommentar' AS art, k.at, k.user, k.nummer, k.text AS detail, NULL AS farbe, NULL AS liste_id"
+                     " FROM kommentar k")
+    if kind in (None, "kategorie"):
+        parts.append("SELECT 'kategorie' AS art, a.at, a.user, a.nummer, a.detail, a.farbe, NULL AS liste_id FROM aktivitaet a"
+                     " WHERE a.art='kategorie'")
+    if kind in (None, "liste"):
+        parts.append("SELECT 'liste' AS art, g.at, g.user, NULL AS nummer,"
+                     " l.name || ': ' || g.aktion || COALESCE(' – ' || g.detail, '') AS detail,"
+                     " NULL AS farbe, g.liste_id FROM liste_log g JOIN liste l ON l.id=g.liste_id")
+    sql = ("SELECT x.*, p.bezeichnung FROM (" + " UNION ALL ".join(parts) + ") x LEFT JOIN produkt p ON p.nummer=x.nummer"
+           " WHERE COALESCE(x.user, '') <> COALESCE(?, '') AND COALESCE(x.at, '') > ?")
+    params += [me, since or ""]
+    if user:
+        sql += " AND x.user = ?"
+        params.append(user)
+    sql += " ORDER BY x.at DESC LIMIT ?"
+    params.append(limit)
+    return conn.execute(sql, params).fetchall()
+
+
+def imports_since(conn, since: str) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM imports WHERE imported_at > ? ORDER BY id", (since,)).fetchall()
+
+
+# ----------------------------------------------------------------------------------------------
+# Sicherung / Notfall-Wiederherstellung der gemeinsamen Datenbank
+def backup_db(conn, dest):
+    """Konsistente Kopie der laufenden Datenbank (SQLite-Backup-API, auch während andere arbeiten)."""
+    target = sqlite3.connect(str(dest))
+    try:
+        conn.backup(target)
+    finally:
+        target.close()
+
+
+def check_backup(path) -> dict:
+    """Prüft, ob eine Datei eine HMV-Datenbank ist; gibt Kennzahlen zurück, sonst ValueError."""
+    try:
+        src = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            tables = {r[0] for r in src.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not {"imports", "produkt", "history"} <= tables:
+                raise ValueError("Die Datei ist keine HMV-Viewer-Datenbank.")
+            return {"versionen": src.execute("SELECT COUNT(*) FROM imports").fetchone()[0],
+                    "produkte": src.execute("SELECT COUNT(*) FROM produkt").fetchone()[0],
+                    "listen": src.execute("SELECT COUNT(*) FROM liste").fetchone()[0] if "liste" in tables else 0}
+        finally:
+            src.close()
+    except sqlite3.DatabaseError as exc:
+        raise ValueError(f"Die Datei ist keine lesbare Datenbank: {exc}") from exc
+
+
+def restore_db(conn, src_path):
+    """Überschreibt den KOMPLETTEN Inhalt der Datenbank von conn mit der Sicherung src_path."""
+    check_backup(src_path)
+    src = sqlite3.connect(f"file:{src_path}?mode=ro", uri=True)
+    try:
+        src.backup(conn)
+    finally:
+        src.close()
+
+
+def lists_for_product(conn, nummer: str) -> list[sqlite3.Row]:
+    """Gemeinsame Listen, die das Produkt direkt oder über eine ganze Gruppe enthalten."""
+    return conn.execute("SELECT DISTINCT l.id, l.name FROM liste_eintrag e JOIN liste l ON l.id=e.liste_id"
+                        " WHERE e.nummer=? OR (length(e.nummer)<10 AND substr(?, 1, length(e.nummer))=e.nummer)"
+                        " ORDER BY l.name COLLATE NOCASE", (nummer, nummer)).fetchall()
 
 
 # ----------------------------------------------------------------------------------------------
