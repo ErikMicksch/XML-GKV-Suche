@@ -31,6 +31,45 @@ Die bisherige Oberfläche (Qt Widgets) startet weiterhin mit `--klassisch`, z. B
 In der Einzeldatei werden die QML-Dateien beim ersten Start je Version nach `%LOCALAPPDATA%\HMV-Viewer\qml_<version>`
 entpackt (QML braucht echte Dateien; keine Adminrechte nötig).
 
+## Speicherorte: Datenbank und Sicherungen (hmv_pfade.json)
+
+Wo die gemeinsame Datenbank und der Sicherungsordner liegen, steht in **einer** Datei `hmv_pfade.json` neben dem
+Programm (neben `hmv_viewer_app.py` bzw. im Programmordner `HMV-Viewer\`). Zieht etwas um, genügt es, diese Datei
+auszutauschen. Vorlage: `hmv_pfade.beispiel.json` (umbenennen in `hmv_pfade.json`):
+
+```
+{
+  "datenbank": "\\\\server\\abteilung\\HMV\\data\\hmv.db",
+  "sicherungen": "\\\\server\\abteilung\\HMV\\data\\sicherungen"
+}
+```
+
+* Backslashes in JSON **doppelt** schreiben (oder `/` verwenden). Relative Angaben gelten ab dem Ordner der Datei,
+  `%VARIABLEN%` werden ersetzt (z. B. `"%USERPROFILE%\\HMV\\hmv.db"`). Fehlt `sicherungen`: Ordner `sicherungen`
+  neben der Datenbank. Ist die Datei fehlerhaft, bricht das Programm mit einem klaren Hinweis ab (statt still eine
+  falsche Datenbank zu öffnen).
+* **Im Programm wählen:** *Einstellungen → Datenbank und Sicherungen*. „Datenbank wählen …“ nimmt eine vorhandene
+  HMV-Datenbank oder legt eine neue an – auf Wunsch als **Kopie der aktuellen** (zum Arbeiten auf dem lokalen PC).
+  Die neue Datenbank gilt nach einem Neustart (Knopf „Jetzt neu starten“), der Sicherungsordner sofort.
+  Ohne Schreibrecht auf die Pfad-Datei landet ihr Inhalt in der Zwischenablage (an die IT weitergeben).
+* Reihenfolge: Umgebungsvariable `HMV_DB` → `hmv_pfade.json` (anderer Ort: Umgebungsvariable `HMV_PFADE`) →
+  `data\hmv.db` neben dem Programm → `%LOCALAPPDATA%\HMV-Viewer`.
+
+### Empfohlener Betrieb: Programm auf dem Client, Datenbank auf dem Netzlaufwerk
+
+Das Programm läuft am schnellsten **lokal auf jedem PC** (Programmordner lokal bzw. über `start_lokal.bat`), nur die
+Datenbank liegt auf dem Netzlaufwerk (`hmv_pfade.json`). Damit dabei möglichst wenig über das Netz gelesen wird:
+
+* **Kleine Indexe statt ganzer Tabelle:** Produktanzahl, Zähler im Produktgruppen-Baum und Herstellerliste kommen aus
+  dem Index `ix_produkt_aktiv`, die Gruppennamen aus `ix_stamm_name`. Die Produktliste wird in zwei Schritten geladen
+  (erst die passenden Nummern aus dem Index, dann nur die angezeigten 500 Produkte).
+* Gemessen mit der echten Datenbank (66.024 Produkte, 119 MB), kalter Cache: Start **8,6 MB statt ~114 MB** gelesen;
+  Liste/Suche/Gruppe/Hersteller je **1–7 MB statt ~70 MB**; Fensterwechsel (Abgleich mit Kollegen) liest nur wenige KB.
+* Die Indexe legt der erste Start mit Schreibrecht einmalig an (Sekundenbereich); 7 gleichzeitige Clients über einen
+  UNC-Pfad (6 lesend, 1 schreibend) liefen dabei ohne Fehler, Integritätsprüfung ok.
+* Weiterhin über das Netz: der tägliche Sicherungslauf (kopiert die ganze Datenbank, im Hintergrund, einmal pro Tag)
+  und Importe.
+
 ## Als .exe weitergeben (ohne Installation, ohne Admin-Rechte)
 
 Auf einem Windows-Rechner mit Python: **`build_exe.bat` doppelklicken** → Programmordner `dist\HMV-Viewer\`
@@ -41,7 +80,14 @@ ohne Admin-Rechte:
   USB-Stick). Ist der Ordner nicht beschreibbar und gibt es dort noch keine Datenbank, wird `%LOCALAPPDATA%\HMV-Viewer` verwendet.
 * Ordner statt Einzeldatei: beim Start wird nichts entpackt. **`start_lokal.bat`** (neben den Ordnern `HMV-Viewer` und
   `data`) kopiert nur Geändertes nach `%LOCALAPPDATA%\HMV-Viewer-Programm` und startet von dort – schneller Start,
-  die Datenbank bleibt auf dem Netzlaufwerk (`HMV_DB`).
+  die Datenbank bleibt auf dem Netzlaufwerk. Die Speicherorte kommen dabei aus `HMV-Viewer\hmv_pfade.json` auf dem
+  Netzlaufwerk (fehlt sie: `data\hmv.db` neben `start_lokal.bat`).
+* **Start-Protokoll:** `%TEMP%\HMV-Viewer_<Benutzer>.log` (Start, Datenbank, Grafik, Qt-Meldungen). Kann ein PC die
+  Grafik nicht starten (z. B. Remote-Desktop, virtuelle Maschine), stellt das Programm einmalig auf einfache
+  Software-Darstellung um (ohne Schatten) und startet neu; erzwingen mit Umgebungsvariable `HMV_GRAFIK=software`.
+* `build_exe.bat` baut ohne UPX-Packer und entfernt danach ungenutzte Qt-Teile (`tools/trim_exe.py`: Web-Engine,
+  3D, PDF, Diagramme …) – ca. 140 statt 410 MB. Geprüft: startet und zeigt die Oberfläche; Windows Defender
+  (Signaturen vom 23.10.2026) meldet im ganzen Programmordner nichts.
 * Die .exe ist nicht signiert: Windows SmartScreen kann „Weitere Informationen → Trotzdem ausführen“ anzeigen,
   Virenscanner melden bei PyInstaller-Dateien gelegentlich Fehlalarme. Abhilfe: Code-Signing-Zertifikat
   oder Freigabe durch die IT.

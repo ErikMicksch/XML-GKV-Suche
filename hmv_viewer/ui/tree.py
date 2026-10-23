@@ -109,7 +109,7 @@ class Tree(QObject):
         core = self.core
         store = core.store
         hier = prune(core.hier_data, self.term) if self.term else core.hier_data
-        total = queries.count_products(core.conn, ProductFilter(status="aktiv"))
+        total = core.total_active
         recent = _node("recent", "Zuletzt angesehen", f"({len(core.recent)})", "history", key={"zuletzt": True},
                        tip="Ihre zuletzt geöffneten Produkte (max. 20)")
         fav = _node("fav", "Meine Favoriten", f"({count_label(store.favs)})", "starFilled", "gold", True,

@@ -8,8 +8,8 @@ AppDialog {
     id: dlg
     title: "Einstellungen"
     iconName: "settings"
-    preferredWidth: 720
-    maxHeight: 820
+    preferredWidth: 760
+    maxHeight: 1000
 
     ScrollView {
         id: sv
@@ -86,6 +86,33 @@ AppDialog {
                 spacing: 10
                 Btn { iconName: "folder"; text: "Anderen Ordner wählen …"; onClicked: maint.changeFavFolder() }
                 Btn { iconName: "external"; text: "Ordner im Explorer öffnen"; flat: true; onClicked: maint.openFavFolder() }
+            }
+            Rectangle { Layout.fillWidth: true; height: 1; color: theme.c.line; Layout.topMargin: 6 }
+            AppText { text: "Datenbank und Sicherungen (gilt für alle, die dieses Programm starten)"; font.weight: Font.Bold
+                      Layout.fillWidth: true; wrapMode: Text.WordWrap; elide: Text.ElideNone }
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 2
+                columnSpacing: 12
+                AppText { text: "Datenbank:"; color: theme.c.muted }
+                AppText { Layout.fillWidth: true; text: core.dbPath; wrapMode: Text.WrapAnywhere; elide: Text.ElideNone }
+                AppText { text: "Sicherungen:"; color: theme.c.muted }
+                AppText { Layout.fillWidth: true; text: maint.backupPath; wrapMode: Text.WrapAnywhere; elide: Text.ElideNone }
+            }
+            Flow {
+                Layout.fillWidth: true
+                spacing: 10
+                Btn { iconName: "database"; text: "Datenbank wählen …"; onClicked: maint.chooseDatabase() }
+                Btn { iconName: "folder"; text: "Sicherungsordner wählen …"; onClicked: maint.chooseBackupDir() }
+            }
+            AppText {
+                Layout.fillWidth: true
+                rel: 0.9
+                color: theme.c.muted
+                wrapMode: Text.WordWrap
+                elide: Text.ElideNone
+                text: "Gespeichert in " + maint.pathsFile + " – zieht die Datenbank um, genügt es, diese Datei auszutauschen."
+                      + (maint.envOverride ? " Achtung: Die Umgebungsvariable HMV_DB hat Vorrang vor dieser Datei." : "")
             }
             AppText { text: "Weitere"; font.weight: Font.Bold; Layout.topMargin: 6 }
             Flow {

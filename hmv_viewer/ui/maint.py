@@ -5,17 +5,20 @@ import datetime as dt
 import getpass
 import html
 import os
+import json
 import sqlite3
+import sys
 import threading
 import xml.etree.ElementTree as ET
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Property, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, Property, QProcess, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import QFileDialog
 
 from hmv_viewer import __version__, db, exporter, importer, queries
+from hmv_viewer.config import backup_dir, load_paths, paths_file, save_paths
 from hmv_viewer.gui import DEFAULT_MARK_COLOR, HELP, SHORTCUTS, Worker, _dots, _when, _who
 from hmv_viewer.model import format_nummer
 from hmv_viewer.parser import SourceError
@@ -24,6 +27,20 @@ from hmv_viewer.queries import ProductFilter
 # Farbfelder statt Farbrad – leicht zu treffen, gut unterscheidbar
 SWATCHES = ("#2E9E5B", "#E8A317", "#D64541", "#1E88E5", "#8E44AD", "#00897B", "#F06292", "#6D4C41", "#546E7A",
             "#C0CA33", "#FF7043", "#3949AB")
+
+
+def restart_program():
+    """Programm mit denselben Argumenten neu starten (neue Pfade, Grafikmodus)."""
+    if getattr(sys, "frozen", False):
+        program, args = sys.executable, sys.argv[1:]
+    elif sys.argv[0].endswith("__main__.py"):   # gestartet mit python -m hmv_viewer
+        program, args = sys.executable, ["-m", "hmv_viewer"] + sys.argv[1:]
+    else:
+        program, args = sys.executable, sys.argv
+    QProcess.startDetached(program, args, os.getcwd())
+    QGuiApplication.quit()
+
+
 MARK_COLORS = ("#FFEB3B", "#FFD54F", "#A5D6A7", "#80DEEA", "#F48FB1", "#CE93D8", "#FFAB91", "#B0BEC5")
 
 
@@ -50,6 +67,9 @@ class Maint(QObject):
     swatches = Property("QVariantList", lambda self: list(SWATCHES), constant=True)
     markColors = Property("QVariantList", lambda self: list(MARK_COLORS), constant=True)
     version = Property(str, lambda self: __version__, constant=True)
+    backupPath = Property(str, lambda self: str(backup_dir(self.core.db_path)), notify=changed)
+    pathsFile = Property(str, lambda self: str(paths_file()), constant=True)
+    envOverride = Property(bool, lambda self: bool(os.environ.get("HMV_DB")), constant=True)
 
     @Property("QVariantList", notify=changed)
     def categories(self):
@@ -221,7 +241,7 @@ class Maint(QObject):
         core.detail.save_note()
         stamp = dt.datetime.now().strftime("%Y%m%d_%H%M")
         path, _ = QFileDialog.getSaveFileName(None, "Datenbank sichern",
-                                              str(Path(core.db_path).parent / f"HMV_Sicherung_{stamp}.db"),
+                                              str(backup_dir(core.db_path) / f"HMV_Sicherung_{stamp}.db"),
                                               "SQLite-Datenbank (*.db)")
         if not path:
             return
@@ -253,7 +273,7 @@ class Maint(QObject):
 
     def _restore_pick(self):
         core = self.core
-        path, _ = QFileDialog.getOpenFileName(None, "Sicherung auswählen (NUR IM NOTFALL)", str(Path(core.db_path).parent),
+        path, _ = QFileDialog.getOpenFileName(None, "Sicherung auswählen (NUR IM NOTFALL)", str(backup_dir(core.db_path)),
                                               "SQLite-Datenbank (*.db);;Alle Dateien (*.*)")
         if not path:
             return
@@ -283,7 +303,7 @@ class Maint(QObject):
         core = self.core
         core.detail.save_note()
         stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        safety = Path(core.db_path).parent / "sicherungen" / f"vor_wiederherstellung_{stamp}.db"
+        safety = backup_dir(core.db_path) / f"vor_wiederherstellung_{stamp}.db"
         try:
             safety.parent.mkdir(parents=True, exist_ok=True)
             queries.backup_db(core.conn, safety)   # ohne diese Sicherung wird nichts überschrieben
@@ -299,11 +319,11 @@ class Maint(QObject):
                   f"Der vorherige Stand wurde gesichert unter:<br>{html.escape(str(safety))}", icon="check")
 
     def auto_backup(self, sync=False):
-        """Täglich eine Sicherung der gemeinsamen DB in data/sicherungen (die letzten 14 bleiben)."""
+        """Täglich eine Sicherung der gemeinsamen DB in den Sicherungsordner (die letzten 14 bleiben)."""
         core = self.core
         if core.read_only:
             return None
-        folder = Path(core.db_path).parent / "sicherungen"
+        folder = backup_dir(core.db_path)
         target = folder / f"auto_{dt.date.today():%Y%m%d}.db"
         if target.exists():
             return None
@@ -360,6 +380,74 @@ class Maint(QObject):
     @Slot()
     def openPalette(self):
         self.paletteRequested.emit()
+
+    # ------------------------------------------------------------------ Speicherorte (Pfad-Datei hmv_pfade.json)
+    def _write_paths(self, db_path, backups, restart):
+        core = self.core
+        try:
+            f = save_paths(os.path.abspath(db_path), os.path.abspath(backups))
+        except OSError as exc:
+            text = json.dumps({"datenbank": os.path.abspath(db_path), "sicherungen": os.path.abspath(backups)},
+                              ensure_ascii=False, indent=2)
+            QGuiApplication.clipboard().setText(text)
+            core.info("Pfad-Datei nicht beschreibbar", f"{html.escape(str(paths_file()))} kann nicht geschrieben werden:"
+                      f"<br>{html.escape(str(exc))}<br><br>Der Inhalt wurde in die Zwischenablage kopiert – bitte die "
+                      f"Datei damit ersetzen (lassen):<pre>{html.escape(text)}</pre>", icon="alert")
+            return
+        self.changed.emit()
+        if not restart:
+            core.toast(f"Sicherungen werden jetzt gespeichert in {backups}")
+            return
+        hint = ("<br><br><b>Achtung:</b> Die Umgebungsvariable HMV_DB legt die Datenbank fest und hat Vorrang "
+                "vor der Pfad-Datei.") if os.environ.get("HMV_DB") else ""
+        core.ask("Datenbank geändert", f"Gespeichert in <b>{html.escape(str(f))}</b>.<br>Die neue Datenbank wird nach "
+                 f"einem Neustart verwendet.{hint}", [("later", "Später"), ("now", "Jetzt neu starten", True)],
+                 lambda b, _t: b == "now" and (core.detail.save_note(), restart_program()), icon="database")
+
+    @Slot()
+    def chooseDatabase(self):
+        core = self.core
+        path, _ = QFileDialog.getSaveFileName(None, "Datenbank wählen – vorhandene Datei oder neuer Name", core.db_path,
+                                              "SQLite-Datenbank (*.db);;Alle Dateien (*.*)",
+                                              options=QFileDialog.Option.DontConfirmOverwrite)
+        if not path or os.path.abspath(path) == os.path.abspath(core.db_path):
+            return
+        path = Path(path)
+        backups = load_paths().get("sicherungen") or path.parent / "sicherungen"   # Standard: neben der Datenbank
+        if path.exists():
+            try:
+                info = queries.check_backup(path)
+            except ValueError as exc:
+                core.info("Keine HMV-Datenbank", html.escape(str(exc)), icon="alert")
+                return
+            core.info("Datenbank gefunden", f"{info['versionen']} Versionen, {_dots(info['produkte'])} Produkte.")
+            self._write_paths(path, backups, True)
+            return
+
+        def answered(button, _t):
+            if button == "copy":
+                try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    queries.backup_db(core.conn, path)   # konsistente Kopie, auch während andere arbeiten
+                except (sqlite3.Error, OSError) as exc:
+                    core.info("Kopieren fehlgeschlagen", html.escape(f"{type(exc).__name__}: {exc}"), icon="alert")
+                    return
+            if button in ("copy", "empty"):
+                self._write_paths(path, backups, True)
+
+        core.ask("Neue Datenbank", f"Unter <b>{html.escape(str(path))}</b> gibt es noch keine Datenbank.<br><br>"
+                 "Aktuelle Datenbank dorthin <b>kopieren</b> (z. B. um lokal zu arbeiten) oder <b>leer</b> beginnen "
+                 "(danach eine HMV-XML importieren)?",
+                 [("cancel", "Abbrechen"), ("empty", "Leer beginnen"), ("copy", "Aktuelle kopieren", True)], answered,
+                 icon="database")
+
+    @Slot()
+    def chooseBackupDir(self):
+        core = self.core
+        folder = QFileDialog.getExistingDirectory(None, "Ordner für Sicherungen wählen", str(backup_dir(core.db_path)))
+        if folder:
+            # eine schon gewählte (noch nicht aktive) Datenbank nicht überschreiben
+            self._write_paths(load_paths().get("datenbank") or core.db_path, folder, False)
 
     # ------------------------------------------------------------------ Einstellungen
     @Slot(str)
@@ -441,7 +529,7 @@ class Maint(QObject):
         rows = [("Version", f"HMV-Viewer {__version__} (QML-Test)"), ("Benutzer", f"{core.user} (Windows: {getpass.getuser()})"),
                 ("Datenbank", core.db_path), ("Schreibrecht", "nein – nur lesen" if core.read_only else "ja"),
                 ("Journal-Modus", mode), ("Favoriten-Datei", str(core.store.path)),
-                ("Sicherungen", str(Path(core.db_path).parent / "sicherungen")),
+                ("Sicherungen", str(backup_dir(core.db_path))), ("Pfad-Datei", str(paths_file())),
                 ("Python", f"{platform.python_version()} ({platform.system()} {platform.release()})"),
                 ("Qt / PySide6", f"{qVersion()} / {PySide6.__version__}"), ("SQLite", sqlite3.sqlite_version)]
         log = Path(core.db_path).parent / f"fehler_{getpass.getuser()}.log"

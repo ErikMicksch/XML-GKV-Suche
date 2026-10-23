@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QFileDialog
 
 from hmv_viewer import db, queries
 from hmv_viewer.favorites import FILE_NAME, FavoriteStore, legacy_db_keys
+from hmv_viewer.queries import ProductFilter
 from hmv_viewer.gui import _key_tuple
 
 def qml_settings():
@@ -52,6 +53,7 @@ class Core(QObject):
         self.lists = {}
         self.hier_data, self.node_by_key = [], {}
         self.comment_info = {}
+        self.total_active = 0
         self.recent = self._load_recent()
         self.last_open = self.settings.value("zuletzt_geoeffnet")
         self._fav_dir_arg, self._user_arg = fav_dir, user
@@ -233,6 +235,8 @@ class Core(QObject):
         self.lists = {r["id"]: r for r in queries.list_lists(self.conn)}
         self.comment_info = queries.comment_summary(self.conn)
         self.hier_data = queries.hierarchy_tree(self.conn)
+        # einmal je Laden zählen – nicht bei jedem Fensterwechsel erneut über das Netzlaufwerk
+        self.total_active = queries.count_products(self.conn, ProductFilter(status="aktiv"))
         self.node_by_key = {}
 
         def index(nodes):

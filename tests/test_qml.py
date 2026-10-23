@@ -175,5 +175,40 @@ class Flow(unittest.TestCase):
         self.assertEqual([m for m in MESSAGES if "qml" in m.lower() or "warning" in m.lower()], [])
 
 
+class ChoosePaths(unittest.TestCase):
+    """Einstellungen → Datenbank / Sicherungsordner wählen schreibt die Pfad-Datei (aktuelle DB kopieren)."""
+
+    def test_choose_database_and_backups(self):
+        import json
+        from unittest import mock
+        from PySide6.QtWidgets import QFileDialog
+        from tests.make_sample import write_sample
+        from hmv_viewer import db, importer
+        from hmv_viewer.config import default_db_path
+        from hmv_viewer.ui.app import build, setup_app
+
+        tmp = Path(tempfile.mkdtemp())
+        paths = tmp / "hmv_pfade.json"
+        src = tmp / "alt" / "hmv.db"
+        src.parent.mkdir()
+        importer.import_file(db.connect(str(src)), write_sample(str(tmp / "20260101_HMV.xml")))
+        new_db, backups = tmp / "lokal" / "hmv.db", tmp / "backups"
+        setup_app()
+        with mock.patch.dict(os.environ, {"HMV_PFADE": str(paths)}),                 mock.patch.object(QFileDialog, "getSaveFileName", lambda *a, **k: (str(new_db), "")),                 mock.patch.object(QFileDialog, "getExistingDirectory", lambda *a, **k: str(backups)):
+            env_db = os.environ.pop("HMV_DB", None)
+            core, _engine = build(str(src), settings=QSettings(str(tmp / "s.ini"), QSettings.Format.IniFormat),
+                                  fav_dir=str(tmp), user="T", auto_backup=False)
+            core.auto_answer = lambda spec: ("copy" if spec["title"] == "Neue Datenbank" else "later", "")
+            core.maint.chooseDatabase()
+            self.assertTrue(new_db.exists())                      # aktuelle Datenbank dorthin kopiert
+            core.maint.chooseBackupDir()
+            self.assertEqual(json.loads(paths.read_text(encoding="utf-8")),
+                             {"datenbank": str(new_db), "sicherungen": str(backups)})
+            self.assertEqual(default_db_path(), new_db)           # gilt beim nächsten Start
+            self.assertEqual(core.maint.backupPath, str(backups))  # Sicherungsordner gilt sofort
+            if env_db:
+                os.environ["HMV_DB"] = env_db
+
+
 if __name__ == "__main__":
     unittest.main()

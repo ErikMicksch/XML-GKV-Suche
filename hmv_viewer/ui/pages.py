@@ -37,7 +37,7 @@ class Dashboard(QObject):
             return
         hour = dt.datetime.now().hour
         greet = "Guten Morgen" if hour < 11 else "Guten Tag" if hour < 18 else "Guten Abend"
-        total = queries.count_products(core.conn, ProductFilter(status="aktiv"))
+        total = core.total_active
         versions = queries.list_versions(core.conn)
         n_fav = queries.count_products(core.conn, ProductFilter(status="aktiv", favoriten=True))
         prods = core.products

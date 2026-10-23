@@ -12,12 +12,15 @@ where py >nul 2>nul && (set PY=py -3) || (set PY=python)
 %PY% -m pip install pyinstaller PySide6 || goto :fail
 %PY% -m unittest discover -s tests || goto :fail
 rem Kein --uac-admin: die .exe läuft immer mit normalen Benutzerrechten (Manifest "asInvoker").
-%PY% -m PyInstaller --noconfirm --clean --onedir --windowed ^
+rem --noupx: gepackte .exe-Dateien lösen bei Virenscannern häufiger Fehlalarme aus.
+%PY% -m PyInstaller --noconfirm --clean --onedir --windowed --noupx ^
     --name HMV-Viewer ^
     --add-data "hmv_viewer\ui\qml;hmv_viewer\ui\qml" ^
     --collect-submodules hmv_viewer ^
     --exclude-module pytest --exclude-module numpy --exclude-module pandas --exclude-module tkinter ^
     run_hmv.py || goto :fail
+rem Ungenutzte Qt-Teile entfernen (Web-Engine, 3D, PDF …): ~410 MB -> ~140 MB, weniger Dateien für Virenscanner
+%PY% tools\trim_exe.py dist\HMV-Viewer || goto :fail
 copy /y start_lokal.bat dist\ >nul
 echo.
 echo Fertig: %~dp0dist\HMV-Viewer\HMV-Viewer.exe  und  %~dp0dist\start_lokal.bat

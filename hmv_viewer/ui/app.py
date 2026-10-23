@@ -8,7 +8,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, QSettings, QtMsgType, QTimer, QUrl, qInstallMessageHandler
+from PySide6.QtCore import QSettings, QtMsgType, QTimer, QUrl, qInstallMessageHandler
 from PySide6.QtGui import QFont
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuick import QQuickWindow, QSGRendererInterface
@@ -20,7 +20,7 @@ from .detail import Detail
 from .dialogs import Compare, Palette, Picker
 from .icons import IconProvider
 from .lists import Lists
-from .maint import Maint
+from .maint import Maint, restart_program
 from .pages import Activity, Dashboard, Versions
 from .products import Products
 from .theme import Theme
@@ -51,7 +51,8 @@ def qml_dir():
 
 
 def setup_app():
-    QQuickStyle.setStyle("Basic")   # vollständig eigenes Aussehen (AOK), unabhängig vom Windows-Design
+    if not QQuickStyle.name() == "Basic":   # nur einmal und vor dem ersten QML (mehrere Tests in einem Lauf)
+        QQuickStyle.setStyle("Basic")   # vollständig eigenes Aussehen (AOK), unabhängig vom Windows-Design
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("HMV-Viewer")
     app.setFont(QFont("Segoe UI", 10))
@@ -156,8 +157,9 @@ def run_qml(db_path, fav_dir=None):
                                  f"{message}\n\nAusweichen: start.bat mit „--klassisch“ starten.\nProtokoll: {LOG}")
         else:   # einmalig auf Software-Darstellung umstellen und neu starten
             settings.setValue(SOFTWARE_KEY, True)
-            args = sys.argv[1:] if getattr(sys, "frozen", False) else sys.argv
-            QProcess.startDetached(sys.executable, args)
+            settings.sync()   # vor dem Neustart sicher gespeichert
+            restart_program()
+            return
         app.quit()
 
     win.sceneGraphError.connect(graphics_failed)

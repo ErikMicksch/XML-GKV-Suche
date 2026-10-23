@@ -161,9 +161,15 @@ def fetch_products(conn, f: ProductFilter, order: str = "nummer", desc: bool = F
     order_sql = ORDER_COLUMNS.get(order, "p.nummer")
     direction = "DESC" if desc else "ASC"
     order_by = ", ".join(f"{c.strip()} {direction}" for c in order_sql.split(",")) + ", p.nummer ASC"
-    sql = (f"SELECT p.*, {shown} AS shown_type FROM produkt p{join}{where}"
-           f" ORDER BY {order_by} LIMIT ? OFFSET ?")
-    return conn.execute(sql, params + [limit, offset]).fetchall()
+    # Zwei Schritte (wichtig auf dem Netzlaufwerk): erst die passenden Zeilen in Reihenfolge aus dem kleinen Index
+    # ix_produkt_aktiv bestimmen, dann nur diese vollständig lesen – sonst sortiert SQLite ganze Zeilen samt Merkmalen.
+    picked = conn.execute(f"SELECT p.rowid, {shown} FROM produkt p{join}{where} ORDER BY {order_by} LIMIT ? OFFSET ?",
+                          params + [limit, offset]).fetchall()
+    if not picked:
+        return []
+    return conn.execute("SELECT p.*, json_extract(j.value, '$[1]') AS shown_type FROM json_each(?) j"
+                        " JOIN produkt p ON p.rowid = json_extract(j.value, '$[0]') ORDER BY j.key",
+                        (json.dumps([list(r) for r in picked]),)).fetchall()
 
 
 def iter_products(conn, f: ProductFilter, batch: int = 2000) -> Iterator[sqlite3.Row]:
@@ -499,8 +505,10 @@ class Names:
 
     def __init__(self, conn):
         self.gruppe, self.ort, self.ug, self.art = {}, {}, {}, {}
-        for r in conn.execute("SELECT entity, gruppe, ort, untergruppe, art, data FROM stamm"):
-            name = json.loads(r["data"]).get("BEZEICHNUNG") or ""
+        # gleicher Ausdruck wie im Index ix_stamm_name -> nur der kleine Index wird gelesen, nicht die JSON-Daten
+        for r in conn.execute("SELECT entity, gruppe, ort, untergruppe, art, json_extract(data, '$.BEZEICHNUNG') AS name"
+                              " FROM stamm"):
+            name = r["name"] or ""
             e = r["entity"]
             if e == "GRUPPE":
                 self.gruppe[r["gruppe"]] = name

@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS produkt(
 );
 CREATE INDEX IF NOT EXISTS ix_produkt_gruppe ON produkt(gruppe, ort, untergruppe, art);
 CREATE INDEX IF NOT EXISTS ix_produkt_lastchg ON produkt(last_import_change);
+-- Netzlaufwerk: Baum-Zähler, Anzahl und Herstellerliste nur aus diesem kleinen Index statt der ganzen Tabelle (~2 statt ~75 MB)
+CREATE INDEX IF NOT EXISTS ix_produkt_aktiv ON produkt(active, gruppe, ort, untergruppe, art, hersteller, nummer,
+                                                     bezeichnung);
 
 CREATE TABLE IF NOT EXISTS stamm(
     entity             TEXT NOT NULL,
@@ -56,6 +59,9 @@ CREATE TABLE IF NOT EXISTS stamm(
     last_change_type   TEXT,
     PRIMARY KEY(entity, k)
 );
+-- Bezeichnungen der Hierarchie ohne die großen JSON-Daten lesen (~0,3 statt ~9 MB)
+CREATE INDEX IF NOT EXISTS ix_stamm_name ON stamm(entity, active, gruppe, ort, untergruppe, art,
+                                                  json_extract(data, '$.BEZEICHNUNG'));
 
 CREATE TABLE IF NOT EXISTS history(
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

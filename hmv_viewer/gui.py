@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__, db, exporter, importer, merkmale, queries
+from .config import backup_dir
 from .favorites import FILE_NAME, FavoriteStore, legacy_db_keys
 from .model import CHANGE_LABELS, ENTFERNT, FIELD_LABELS, GEAENDERT, NEU, REAKTIVIERT, UMGRUPPIERT, format_nummer
 from .parser import SourceError
@@ -2437,7 +2438,7 @@ class MainWindow(QMainWindow):
         self._save_note()
         stamp = dt.datetime.now().strftime("%Y%m%d_%H%M")
         path, _ = QFileDialog.getSaveFileName(self, "Datenbank sichern",
-                                              str(Path(self.db_path).parent / f"HMV_Sicherung_{stamp}.db"),
+                                              str(backup_dir(self.db_path) / f"HMV_Sicherung_{stamp}.db"),
                                               "SQLite-Datenbank (*.db)")
         if not path:
             return
@@ -2471,7 +2472,7 @@ class MainWindow(QMainWindow):
         box.exec()
         if box.clickedButton() is not go:
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Sicherung auswählen (NUR IM NOTFALL)", str(Path(self.db_path).parent),
+        path, _ = QFileDialog.getOpenFileName(self, "Sicherung auswählen (NUR IM NOTFALL)", str(backup_dir(self.db_path)),
                                               "SQLite-Datenbank (*.db);;Alle Dateien (*.*)")
         if not path:
             return
@@ -2494,7 +2495,7 @@ class MainWindow(QMainWindow):
             return
         self._save_note()
         stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        safety = Path(self.db_path).parent / "sicherungen" / f"vor_wiederherstellung_{stamp}.db"
+        safety = backup_dir(self.db_path) / f"vor_wiederherstellung_{stamp}.db"
         try:
             safety.parent.mkdir(parents=True, exist_ok=True)
             queries.backup_db(self.conn, safety)   # ohne diese Sicherung wird nichts überschrieben
@@ -2804,10 +2805,10 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ automatische Sicherung, Info
     def _auto_backup(self, sync=False):
-        """Täglich eine Sicherung der gemeinsamen DB in data/sicherungen (die letzten 14 bleiben)."""
+        """Täglich eine Sicherung der gemeinsamen DB in den Sicherungsordner (die letzten 14 bleiben)."""
         if self.read_only:
             return None
-        folder = Path(self.db_path).parent / "sicherungen"
+        folder = backup_dir(self.db_path)
         target = folder / f"auto_{dt.date.today():%Y%m%d}.db"
         if target.exists():
             return None
@@ -2851,7 +2852,7 @@ class MainWindow(QMainWindow):
         rows = [("Version", f"HMV-Viewer {__version__}"), ("Benutzer", f"{self.user} (Windows: {getpass.getuser()})"),
                 ("Datenbank", self.db_path), ("Schreibrecht", "nein – nur lesen" if self.read_only else "ja"),
                 ("Journal-Modus", mode), ("Favoriten-Datei", str(self.store.path)),
-                ("Sicherungen", str(Path(self.db_path).parent / "sicherungen")),
+                ("Sicherungen", str(backup_dir(self.db_path))),
                 ("Python", f"{platform.python_version()} ({platform.system()} {platform.release()})"),
                 ("Qt / PySide6", f"{qVersion()} / {PySide6.__version__}"), ("SQLite", sqlite3.sqlite_version)]
         log = Path(self.db_path).parent / f"fehler_{getpass.getuser()}.log"

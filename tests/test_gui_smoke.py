@@ -11,6 +11,8 @@ import time
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# nie in echte Speicherorte aus einer vorhandenen hmv_pfade.json sichern
+os.environ["HMV_PFADE"] = os.path.join(tempfile.gettempdir(), "hmv_pfade_test_gibt_es_nicht.json")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
