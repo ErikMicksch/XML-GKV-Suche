@@ -1,12 +1,17 @@
 """Start der Oberfläche (Qt Quick/QML): Bereiche anlegen, QML laden, Fenstergröße merken."""
 from __future__ import annotations
 
+import datetime as dt
+import getpass
+import os
 import sys
+import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtCore import QProcess, QSettings, QtMsgType, QTimer, QUrl, qInstallMessageHandler
 from PySide6.QtGui import QFont
 from PySide6.QtQml import QQmlApplicationEngine
+from PySide6.QtQuick import QQuickWindow, QSGRendererInterface
 from PySide6.QtQuickControls2 import QQuickStyle
 from PySide6.QtWidgets import QApplication
 
@@ -118,7 +123,43 @@ def build(db_path, settings=None, fav_dir=None, user=None, auto_backup=True, sta
     return core, engine
 
 
+LOG = Path(tempfile.gettempdir()) / f"HMV-Viewer_{getpass.getuser()}.log"
+SOFTWARE_KEY = "grafik_software"   # True = einfache Software-Darstellung (ohne Grafikkarte, z. B. Remote-Desktop)
+
+
+def log(text):
+    """Startprotokoll je Benutzer im Temp-Ordner – zeigt bei Problemen, woran es lag."""
+    try:
+        with open(LOG, "a", encoding="utf-8") as fh:
+            fh.write(f"{dt.datetime.now():%Y-%m-%d %H:%M:%S}  {text}\n")
+    except OSError:
+        pass
+
+
 def run_qml(db_path, fav_dir=None):
+    qInstallMessageHandler(lambda mode, _ctx, msg: mode != QtMsgType.QtDebugMsg and log(msg))
+    settings = QSettings("HMV-Viewer", "HMV-Viewer")
+    software = os.environ.get("HMV_GRAFIK") == "software" or str(settings.value(SOFTWARE_KEY, "")).lower() == "true"
+    log(f"Start HMV-Viewer, Datenbank {db_path}, Grafik: {'Software' if software else 'Standard'}")
+    if software:
+        QQuickWindow.setGraphicsApi(QSGRendererInterface.GraphicsApi.Software)
     app = setup_app()
-    _core, _engine = build(db_path, fav_dir=fav_dir)
+    _core, engine = build(db_path, fav_dir=fav_dir)
+    win = engine.rootObjects()[0]
+
+    def graphics_failed(_error, message):
+        # Ohne diese Verbindung beendet Qt das Programm kommentarlos (kein Fenster, kein Hinweis).
+        log(f"Grafik-Fehler: {message}")
+        if software:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.critical(None, "HMV-Viewer – Grafik", f"Die Oberfläche kann auf diesem PC nicht angezeigt werden:\n"
+                                 f"{message}\n\nAusweichen: start.bat mit „--klassisch“ starten.\nProtokoll: {LOG}")
+        else:   # einmalig auf Software-Darstellung umstellen und neu starten
+            settings.setValue(SOFTWARE_KEY, True)
+            args = sys.argv[1:] if getattr(sys, "frozen", False) else sys.argv
+            QProcess.startDetached(sys.executable, args)
+        app.quit()
+
+    win.sceneGraphError.connect(graphics_failed)
+    log("Oberfläche geladen")
     return app.exec()

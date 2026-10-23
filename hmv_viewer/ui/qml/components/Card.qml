@@ -6,7 +6,7 @@ Item {
     id: card
     default property alias content: inner.data
     property int padding: 16
-    property bool shadow: true
+    property bool shadow: GraphicsInfo.api !== GraphicsInfo.Software
     property color fill: theme.c.surface
 
     Rectangle {
