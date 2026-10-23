@@ -28,6 +28,9 @@ def write_sample(path, variant=1):
         prods[1] = ("Muster Pumpe A", "Muster GmbH", "Gewicht: 4,7 kg\nLeistung: 100 VA", "2020-01-01")
         del prods[2]
         prods[5] = ("Neue Pumpe E", "Muster GmbH", "neu", "2026-02-01")
+    if variant == 3:   # Umgruppierung: Pumpe B bekommt Nummer 7; Platzhalter 4 -> 8 darf NICHT als Umgruppierung zählen
+        prods[7] = prods.pop(2)
+        prods[8] = prods.pop(4)
     for nr, (name, maker, merk, date) in prods.items():
         out.append(_el("HMV_PRODUKT", GRUPPE=1, ORT=24, UNTERGRUPPE=1, ART=0, PRODUKT=nr,
                        BEZEICHNUNG=name, HERSTELLER=maker, MERKMALE=merk, AUFNAHMEDATUM=date))

@@ -16,12 +16,14 @@ NEU = "NEU"
 GEAENDERT = "GEAENDERT"
 ENTFERNT = "ENTFERNT"
 REAKTIVIERT = "REAKTIVIERT"
+UMGRUPPIERT = "UMGRUPPIERT"   # neue 10-stellige Nummer für dasselbe Produkt (andere Gruppe/Art)
 
 CHANGE_LABELS = {
     NEU: "Neu",
     GEAENDERT: "Geändert",
     ENTFERNT: "Entfernt",
     REAKTIVIERT: "Wieder aufgenommen",
+    UMGRUPPIERT: "Umgruppiert",
 }
 
 ENTITY_LABELS = {
@@ -33,6 +35,7 @@ ENTITY_LABELS = {
 }
 
 FIELD_LABELS = {
+    "NUMMER": "Hilfsmittelnummer",
     "ONL_STATUS": "Online-Status",
     "BEZEICHNUNG": "Bezeichnung",
     "DEFINITION": "Definition",

@@ -18,7 +18,8 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .model import (ENTITY_DEFS, ENTITY_BY_NAME, GEAENDERT, ENTFERNT, NEU, REAKTIVIERT, make_key)
+from .model import (ENTITY_DEFS, ENTITY_BY_NAME, GEAENDERT, ENTFERNT, NEU, REAKTIVIERT, UMGRUPPIERT, format_nummer,
+                    make_key)
 from .parser import open_source, parse_records, sha256_of_source, source_date_from_name
 
 Progress = Callable[[str, int, int], None]
@@ -56,6 +57,7 @@ class ImportResult:
     n_reactivated: int = 0
     n_unchanged: int = 0
     n_stamm_changes: int = 0
+    n_regrouped: int = 0
     first_import: bool = False
     warnings: list = field(default_factory=list)
 
@@ -136,11 +138,16 @@ def import_file(conn: sqlite3.Connection, path, *, force: bool = False,
             else:
                 _apply_stamm(conn, imp_id, edef.name, data[edef.name], result)
 
+        result.n_regrouped = detect_regroupings(conn, imp_id)
+        progress("Suchindex aufbauen …", 0, 0)
+        merkmale_rebuild(conn)
+        result.n_new -= result.n_regrouped
+        result.n_removed -= result.n_regrouped
         conn.execute(
-            "UPDATE imports SET n_new=?, n_changed=?, n_removed=?, n_reactivated=?, n_unchanged=?, n_stamm_changes=?"
-            " WHERE id=?",
+            "UPDATE imports SET n_new=?, n_changed=?, n_removed=?, n_reactivated=?, n_unchanged=?, n_stamm_changes=?,"
+            " n_regrouped=? WHERE id=?",
             (result.n_new, result.n_changed, result.n_removed, result.n_reactivated,
-             result.n_unchanged, result.n_stamm_changes, imp_id))
+             result.n_unchanged, result.n_stamm_changes, result.n_regrouped, imp_id))
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")
@@ -150,6 +157,40 @@ def import_file(conn: sqlite3.Connection, path, *, force: bool = False,
 
 
 # ---------------------------------------------------------------------------------------------------
+def merkmale_rebuild(conn):
+    from . import merkmale
+    for stmt in filter(str.strip, merkmale.SCHEMA.split(";")):   # executescript würde die Transaktion beenden
+        conn.execute(stmt)
+    merkmale.rebuild(conn)
+
+
+def _regroup_key(row):
+    name = " ".join((row["bezeichnung"] or "").split()).casefold()
+    if not name or name == "nicht besetzt":   # Platzhalter des HMV – nie als Umgruppierung werten
+        return None
+    return name, " ".join((row["hersteller"] or "").split()).casefold()
+
+
+def detect_regroupings(conn, imp_id) -> int:
+    """Umgruppierung = ein Produkt fällt in dieser Version weg und eines mit gleicher Bezeichnung und gleichem
+    Hersteller kommt neu hinzu (neue 10-/7-stellige Nummer). Nur eindeutige Paare zählen.
+    Beide History-Einträge werden zu UMGRUPPIERT mit {"NUMMER": [alt, neu]}. Gibt die Anzahl Paare zurück."""
+    new, old = {}, {}
+    for r in conn.execute("SELECT h.id, h.k, h.change_type, p.bezeichnung, p.hersteller FROM history h"
+                          " JOIN produkt p ON p.nummer=h.k WHERE h.import_id=? AND h.entity='PRODUKT'"
+                          " AND h.change_type IN (?, ?)", (imp_id, NEU, ENTFERNT)):
+        key = _regroup_key(r)
+        if key is not None:
+            (new if r["change_type"] == NEU else old).setdefault(key, []).append(r)
+    pairs = [(old[key][0], rows[0]) for key, rows in new.items() if len(rows) == 1 and len(old.get(key, ())) == 1]
+    for o, n in pairs:
+        changes = json.dumps({"NUMMER": [format_nummer(o["k"]), format_nummer(n["k"])]}, ensure_ascii=False)
+        conn.execute("UPDATE history SET change_type=?, changes=? WHERE id IN (?, ?)", (UMGRUPPIERT, changes, o["id"], n["id"]))
+        conn.execute("UPDATE produkt SET last_change_type=? WHERE nummer IN (?, ?) AND last_import_change=?",
+                     (UMGRUPPIERT, o["k"], n["k"], imp_id))
+    return len(pairs)
+
+
 def _apply_produkte(conn, imp_id, new: dict, result: ImportResult, progress: Progress):
     existing = {r["nummer"]: (r["content_hash"], r["active"])
                 for r in conn.execute("SELECT nummer, content_hash, active FROM produkt")}

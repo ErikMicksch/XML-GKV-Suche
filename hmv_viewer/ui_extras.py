@@ -310,39 +310,7 @@ class CommandPalette(QDialog):
 
 
 # ---------------------------------------------------------------------------------------------- Vergleich
-def parse_merkmale(text):
-    """Merkmale des HMV in vergleichbare Eigenschaften zerlegen. Drei Formen kommen vor:
-
-    „Name: Wert“-Zeilen (z. B. Hörgeräte)        -> {"Name": "Wert"}
-    Abschnitt „Beschreibung / Aufbau:“ + Text     -> {"Beschreibung / Aufbau": "<Text>"}
-    reiner Fließtext mit harten Umbrüchen         -> {"Beschreibung": "<Text, Umbrüche/Silbentrennung entfernt>"}
-    """
-    out = {}
-    section = "Beschreibung"
-
-    def append(key, line):
-        prev = out.get(key, "")
-        if prev.endswith("-") and line[:1].islower() and prev[-2:-1].isalpha():
-            out[key] = prev[:-1] + line           # „hö-“ + „henverstellbar“ -> „höhenverstellbar“
-        else:
-            out[key] = f"{prev} {line}".strip()
-
-    for raw in (text or "").splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        key, sep, value = line.partition(":")
-        key, value = key.strip(" -•\t"), value.strip()
-        if sep and key and len(key) <= 70 and len(key.split()) <= 8:   # kurzer Name vor dem Doppelpunkt, kein Satz
-            if value:
-                out[key] = value                  # Name: Wert
-                section = "Beschreibung"
-            else:
-                section = key                     # Abschnittsüberschrift, Text folgt in den nächsten Zeilen
-                out.setdefault(section, "")
-        else:
-            append(section, line)
-    return {k: v for k, v in out.items() if v}
+from .merkmale import parse_merkmale  # noqa: E402 – eine Zerlegung für Detail, Suche und Vergleich
 
 
 class CompareDialog(QDialog):
@@ -609,19 +577,21 @@ class BarChart(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
-        types = ("NEU", "GEAENDERT", "REAKTIVIERT", "ENTFERNT")
+        types = ("NEU", "GEAENDERT", "REAKTIVIERT", "UMGRUPPIERT", "ENTFERNT")
         colors = {t: QColor(_c("TAG_COLORS")[t]).darker(115) for t in types}
         p.setPen(QColor(_c("MUTED")))
         if not self.data:
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Noch keine Änderungen – ab dem zweiten Import sichtbar.")
             return
-        top, bottom, left = 10, 36, 44
+        fm = p.fontMetrics()   # Abstände nach Schriftgröße, sonst wird bei großer Schrift abgeschnitten
+        lh = fm.height()
+        top, bottom, left = 10, 2 * lh + 8, max(44, fm.horizontalAdvance('00000') + 8)
         mx = max(1, max(sum(d.values()) for _, d in self.data))
         n = len(self.data)
         slot = (w - left - 10) / n
         bw = min(46, slot * 0.6)
         p.drawLine(left, h - bottom, w - 10, h - bottom)
-        p.drawText(QRectF(0, top - 6, left - 6, 14), Qt.AlignmentFlag.AlignRight, f"{mx}")
+        p.drawText(QRectF(0, top - 6, left - 6, lh), Qt.AlignmentFlag.AlignRight, f"{mx}")
         for i, (label, counts) in enumerate(self.data):
             x = left + i * slot + (slot - bw) / 2
             y = h - bottom
@@ -635,15 +605,15 @@ class BarChart(QWidget):
                 p.drawRoundedRect(QRectF(x, y - bh, bw, bh), 3, 3)
                 y -= bh
             p.setPen(QColor(_c("MUTED")))
-            p.drawText(QRectF(x - 20, h - bottom + 4, bw + 40, 16), Qt.AlignmentFlag.AlignCenter, label)
+            p.drawText(QRectF(x - 20, h - bottom + 4, bw + 40, lh), Qt.AlignmentFlag.AlignCenter, label)
         lx = left
-        for t, name in zip(types, ("Neu", "Geändert", "Wieder aufgen.", "Entfernt")):
+        for t, name in zip(types, ("Neu", "Geändert", "Wieder aufgen.", "Umgruppiert", "Entfernt")):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(colors[t])
-            p.drawRoundedRect(QRectF(lx, h - 14, 10, 10), 2, 2)
+            p.drawRoundedRect(QRectF(lx, h - lh / 2 - 7, 10, 10), 2, 2)
             p.setPen(QColor(_c("MUTED")))
-            p.drawText(QRectF(lx + 14, h - 17, 110, 16), Qt.AlignmentFlag.AlignLeft, name)
-            lx += 120
+            p.drawText(QRectF(lx + 14, h - lh - 2, fm.horizontalAdvance(name) + 4, lh), Qt.AlignmentFlag.AlignLeft, name)
+            lx += fm.horizontalAdvance(name) + 34
         p.end()
 
 

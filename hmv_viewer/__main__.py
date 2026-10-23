@@ -1,4 +1,5 @@
-"""Einstieg:  python -m hmv_viewer            -> GUI
+"""Einstieg:  python -m hmv_viewer            -> Oberfläche (Qt Quick/QML)
+             python -m hmv_viewer --klassisch -> bisherige Oberfläche (Qt Widgets)
              python -m hmv_viewer import DATEI.xml|zip [--force]
              python -m hmv_viewer export AUSGABE.xlsx [--scope aktiv|alle] [--suche TEXT] [--version N] [--ohne-historie]
              python -m hmv_viewer versionen
@@ -23,6 +24,7 @@ def _cli_progress(stage, cur, total):
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="hmv_viewer", description="Hilfsmittelverzeichnis-Viewer")
     parser.add_argument("--db", help="Pfad zur SQLite-Datenbank (Standard: data/hmv.db)")
+    parser.add_argument("--klassisch", action="store_true", help="bisherige Oberfläche (Qt Widgets) starten")
     sub = parser.add_subparsers(dest="cmd")
 
     p_imp = sub.add_parser("import", help="XML/ZIP importieren (neue Version anlegen)")
@@ -42,9 +44,11 @@ def main(argv=None) -> int:
     path = args.db or default_db_path()
 
     if args.cmd is None:
-        from .gui import run_gui
-        run_gui(path)
-        return 0
+        if args.klassisch:
+            from .gui import run_gui
+            return run_gui(path)
+        from .ui.app import run_qml
+        return run_qml(path)
 
     conn = db.connect(path)
     if args.cmd == "import":
@@ -57,7 +61,8 @@ def main(argv=None) -> int:
             print(f"\n{e} Mit --force trotzdem importieren.")
             return 2
         print(f"\nVersion {r.import_id}: {r.n_total} Produkte | neu {r.n_new} | geändert {r.n_changed} | "
-              f"entfernt {r.n_removed} | wieder aufgenommen {r.n_reactivated} | unverändert {r.n_unchanged} | "
+              f"entfernt {r.n_removed} | wieder aufgenommen {r.n_reactivated} | umgruppiert {r.n_regrouped} | "
+              f"unverändert {r.n_unchanged} | "
               f"Stammdaten-Änderungen {r.n_stamm_changes}")
         for w in r.warnings[:20]:
             print("Warnung:", w)

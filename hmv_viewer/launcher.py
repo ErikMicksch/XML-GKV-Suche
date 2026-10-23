@@ -50,7 +50,7 @@ def run() -> int:
     try:
         from .__main__ import main
         # GUI-Start ohne Argumente braucht PySide6 -> freundliche Meldung statt Traceback
-        if len(sys.argv) == 1:
+        if len(sys.argv) == 1 or sys.argv[1:] == ["--klassisch"]:
             try:
                 import PySide6  # noqa: F401
             except ImportError:

@@ -1,6 +1,7 @@
 """Qt-Oberfläche (PySide6): Produkte einsehen, Favoriten & Notizen, Versionshistorie, Import und Excel-Export.
 
-Farbwelt angelehnt an die AOK (dunkles Grün, Mint), ohne Logo.
+Farbwelt angelehnt an die AOK (dunkles Grün, Mint), ohne Logo. Standard „AOK Modern“: große Schrift und Bedienelemente,
+Navigation in Klartext und Hilfe (F1) zu jeder Seite – auch ohne PC-Erfahrung bedienbar.
 """
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ import datetime as dt
 import difflib
 import json
 import os
+import re
 import getpass
 import html
 import sqlite3
@@ -21,14 +23,14 @@ from PySide6.QtCore import QEvent, QObject, QSettings, QSize, QStandardPaths, Qt
 from PySide6.QtGui import QBrush, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPalette, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QCompleter, QDialog, QFileDialog, QFrame,
-    QColorDialog, QHBoxLayout, QInputDialog, QListWidget, QListWidgetItem, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressDialog,
+    QColorDialog, QGraphicsDropShadowEffect, QHBoxLayout, QInputDialog, QListWidget, QListWidgetItem, QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressDialog,
     QPushButton, QRadioButton, QScrollArea, QSizePolicy, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget,
     QTextBrowser, QToolButton, QTreeWidget, QTreeWidgetItem, QTreeWidgetItemIterator, QVBoxLayout, QWidget,
 )
 
-from . import __version__, db, exporter, importer, queries
+from . import __version__, db, exporter, importer, merkmale, queries
 from .favorites import FILE_NAME, FavoriteStore, legacy_db_keys
-from .model import CHANGE_LABELS, ENTFERNT, FIELD_LABELS, GEAENDERT, NEU, REAKTIVIERT, format_nummer
+from .model import CHANGE_LABELS, ENTFERNT, FIELD_LABELS, GEAENDERT, NEU, REAKTIVIERT, UMGRUPPIERT, format_nummer
 from .parser import SourceError
 from .queries import ProductFilter
 from .ui_extras import (BarChart, CardView, ClickList, CollapsibleSection, CommandPalette, CommentsWidget,
@@ -36,7 +38,10 @@ from .ui_extras import (BarChart, CardView, ClickList, CollapsibleSection, Comma
 
 PAGE_SIZE = 500
 STATUS_CHOICES = {"Nur aktive": "aktiv", "Nur entfernte": "entfernt", "Alle": "alle"}
-TYPE_CHOICES = {"Alle Änderungstypen": None, **{CHANGE_LABELS[t]: t for t in (NEU, GEAENDERT, ENTFERNT, REAKTIVIERT)}}
+TYPE_CHOICES = {"Alle Änderungstypen": None, **{CHANGE_LABELS[t]: t for t in (NEU, GEAENDERT, ENTFERNT, REAKTIVIERT,
+                                                                                UMGRUPPIERT)},
+                "Geändert – Merkmale": queries.MERKMALE_GEAENDERT}   # nur Änderungen, die die Merkmale betreffen
+DEFAULT_MARK_COLOR = "#FFEB3B"   # Markierung von Suchtreffern in den Merkmalen (gelb, je Benutzer änderbar)
 ALL_VERSIONS = "Alle Versionen"
 ALL_HERSTELLER = "Alle Hersteller"
 
@@ -47,6 +52,7 @@ PRODUCT_COLUMNS = (
     ("nummer", "Hilfsmittelnummer", 125, "nummer"),
     ("bezeichnung", "Bezeichnung", 300, "bezeichnung"),
     ("hersteller", "Hersteller", 190, "hersteller"),
+    ("fund", "Fundstelle (Merkmale)", 280, None),
     ("notiz", "Meine Notiz", 170, None),
     ("gnotiz", "Kommentare", 190, None),
     ("art", "Produktart", 250, "art"),
@@ -67,7 +73,8 @@ THEMES = {
         HEADER_BTN="rgba(255,255,255,0.12)", HEADER_BTN_HOVER="rgba(255,255,255,0.24)",
         HEADER_BTN_BORDER="rgba(255,255,255,0.28)", HEADER_PRIMARY_BG="#FFFFFF", HEADER_PRIMARY_FG="#005E3F",
         DIFF_ADD="#E6FFED", DIFF_DEL="#FFEEF0", DANGER="#B3261E",
-        TAG_COLORS={NEU: "#d9f2d0", GEAENDERT: "#fff2b3", ENTFERNT: "#f6c9c0", REAKTIVIERT: "#cfe3f7"}),
+        TAG_COLORS={NEU: "#d9f2d0", GEAENDERT: "#fff2b3", ENTFERNT: "#f6c9c0", REAKTIVIERT: "#cfe3f7",
+                    UMGRUPPIERT: "#e4dcf3"}),
     "Hell": dict(  # neutral und hell, grüner Akzent, weißer Kopf
         GREEN="#0B7A55", GREEN_DARK="#08603F", MINT="#EEF1F4", MINT_HOVER="#E1E6EB", SELECT="#DCEFE6",
         BG="#F7F8FA", SURFACE="#FFFFFF", LINE="#E3E6EA", TEXT="#1F2328", MUTED="#656D76", GOLD="#C98A00",
@@ -76,7 +83,8 @@ THEMES = {
         HEADER_BTN="#F3F4F6", HEADER_BTN_HOVER="#E7EAEE", HEADER_BTN_BORDER="#E3E6EA",
         HEADER_PRIMARY_BG="#0B7A55", HEADER_PRIMARY_FG="#FFFFFF",
         DIFF_ADD="#E6FFED", DIFF_DEL="#FFEEF0", DANGER="#B3261E",
-        TAG_COLORS={NEU: "#dcf5e3", GEAENDERT: "#fff4c2", ENTFERNT: "#fbd9d3", REAKTIVIERT: "#dbeafb"}),
+        TAG_COLORS={NEU: "#dcf5e3", GEAENDERT: "#fff4c2", ENTFERNT: "#fbd9d3", REAKTIVIERT: "#dbeafb",
+                    UMGRUPPIERT: "#ebe4f7"}),
     "Dunkel": dict(  # dunkle Flächen, helle Schrift, grüner Akzent
         GREEN="#4FC08D", GREEN_DARK="#3BA677", MINT="#24332C", MINT_HOVER="#2E4238", SELECT="#2F5544",
         BG="#15191C", SURFACE="#1E2428", LINE="#2E363B", TEXT="#E6EAE8", MUTED="#98A39D", GOLD="#E8B931",
@@ -85,26 +93,34 @@ THEMES = {
         HEADER_BTN="rgba(255,255,255,0.08)", HEADER_BTN_HOVER="rgba(255,255,255,0.16)",
         HEADER_BTN_BORDER="rgba(255,255,255,0.18)", HEADER_PRIMARY_BG="#4FC08D", HEADER_PRIMARY_FG="#0F2A20",
         DIFF_ADD="#1F3A2A", DIFF_DEL="#432427", DANGER="#FF8A80",
-        TAG_COLORS={NEU: "#1F4730", GEAENDERT: "#4D4216", ENTFERNT: "#552A27", REAKTIVIERT: "#1F3B57"}),
+        TAG_COLORS={NEU: "#1F4730", GEAENDERT: "#4D4216", ENTFERNT: "#552A27", REAKTIVIERT: "#1F3B57",
+                    UMGRUPPIERT: "#3E2F5C"}),
 }
+DEFAULT_THEME = "AOK Modern"
+THEMES = {DEFAULT_THEME: dict(THEMES["Classic"],   # Standard: AOK-Grün mit Verlauf im Kopf, große Bedienelemente
+                              BG="#F3F7F5", LINE="#DDE7E1", MINT="#E1F3E9", MINT_HOVER="#CDEBDB", SELECT="#C4E6D3",
+                              # HEADER wird nur im Stylesheet verwendet, daher ist ein Verlauf möglich
+                              HEADER="qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #00472F, stop:0.6 #005E3F, "
+                                     "stop:1 #00804F)"),
+          **THEMES}
 THEME_NAMES = tuple(THEMES)
-DENSITY = {"Kompakt": 24, "Normal": 30, "Groß": 38}   # Zeilenhöhe der Tabellen
-FONT_SIZES = (9, 10, 11, 12)
-ROW_H = 30
-FONT_PT = 10
+DENSITY = {"Kompakt": 28, "Normal": 34, "Groß": 42, "Sehr groß": 50}   # Zeilenhöhe der Tabellen
+FONT_SIZES = (10, 11, 12, 13, 14, 16)
+ROW_H = 42
+FONT_PT = 12
 
 
 def apply_view(density, font_pt):
     """Zeilenhöhe und Schriftgröße (je Benutzer gespeichert) – wirkt mit dem nächsten apply_theme."""
     global ROW_H, FONT_PT
-    ROW_H = DENSITY.get(density, 30)
-    FONT_PT = int(font_pt) if str(font_pt).isdigit() and int(font_pt) in FONT_SIZES else 10
+    ROW_H = DENSITY.get(density, 42)
+    FONT_PT = int(font_pt) if str(font_pt).isdigit() and int(font_pt) in FONT_SIZES else 12
 TAG_COLORS = {}
 
 
 def apply_theme_colors(name):
     """Setzt die Farb-Variablen dieses Moduls auf die gewählte Farbwelt."""
-    theme = THEMES.get(name, THEMES["Classic"])
+    theme = THEMES.get(name, THEMES[DEFAULT_THEME])
     for key, value in theme.items():
         if key == "TAG_COLORS":
             TAG_COLORS.clear()
@@ -113,7 +129,58 @@ def apply_theme_colors(name):
             globals()[key] = value
 
 
-apply_theme_colors("Classic")
+apply_theme_colors(DEFAULT_THEME)
+
+
+# (Seite im Stapel, Navigations-Text, Icon, Kurzhilfe)
+NAV = ((2, "Startseite", "home", "Überblick: Neuigkeiten, Ihre Favoriten, zuletzt angesehen"),
+       (0, "Produkte suchen", "box", "Alle Hilfsmittel durchsuchen, filtern und ansehen"),
+       (1, "Versionen", "history", "Welche Produkte sich mit einer neuen Liste geändert haben"),
+       (3, "Änderungen anderer", "comment", "Was Kolleginnen und Kollegen kommentiert oder geändert haben"))
+
+# Klartext-Hilfe je Seite (Index im Stapel)
+HELP = {
+    2: ("Startseite", """
+<p>Hier sehen Sie auf einen Blick, was es Neues gibt.</p>
+<ul>
+<li><b>Kacheln oben</b> zeigen Zahlen zum aktuellen Stand. Ein Klick darauf öffnet die passenden Produkte.</li>
+<li><b>Zuletzt angesehen</b>: Ein Klick öffnet das Produkt wieder.</li>
+<li>Mit <b>„Produkte suchen“</b> links kommen Sie zur Suche.</li>
+</ul>"""),
+    0: ("Produkte suchen", """
+<p><b>So finden Sie ein Produkt:</b></p>
+<ol>
+<li>Oben in das <b>große weiße Suchfeld</b> klicken.</li>
+<li>Ein Wort eintippen, z. B. <i>Rollator</i>, oder eine Nummer, z. B. <i>10.46</i>.</li>
+<li>Die Liste darunter zeigt sofort die passenden Produkte.</li>
+<li><b>Einmal auf eine Zeile klicken</b> – rechts erscheinen alle Angaben zum Produkt.</li>
+</ol>
+<p><b>Links</b> stehen die Produktgruppen wie ein Inhaltsverzeichnis. Ein Klick zeigt nur diese Gruppe.</p>
+<p><b>Rechts in den Details</b> können Sie <span style='color:#005E3F'><u>grün unterstrichene</u></span> Angaben anklicken,
+um alle Produkte mit derselben Angabe zu finden.</p>
+<p><b>Merken:</b> Mit dem <b>Stern ★</b> wird ein Produkt zum Favoriten. Unter „Meine Notiz“ können Sie sich etwas aufschreiben –
+es wird automatisch gespeichert.</p>
+<p><b>Rechte Maustaste</b> auf ein Produkt öffnet weitere Möglichkeiten: in eine Liste legen, farbig markieren,
+vergleichen, kopieren.</p>
+<p><b>Nichts gefunden?</b> Auf „Filter zurücksetzen“ klicken – dann wird wieder alles angezeigt.</p>"""),
+    1: ("Versionen", """
+<p>Das Hilfsmittelverzeichnis wird regelmäßig neu veröffentlicht. Jede eingelesene Ausgabe ist eine <b>Version</b>.</p>
+<ul>
+<li>Oben eine Version anklicken – darunter steht, welche Produkte <b>neu</b>, <b>geändert</b>, <b>entfernt</b>
+oder <b>umgruppiert</b> sind.</li>
+<li>Doppelklick auf eine Zeile öffnet das Produkt.</li>
+<li>Eine neue Ausgabe lesen Sie oben über <b>„Importieren“</b> ein.</li>
+</ul>"""),
+    3: ("Änderungen anderer", """
+<p>Hier steht, was andere Personen gemacht haben: <b>Kommentare</b>, <b>farbige Markierungen</b> und
+Änderungen an <b>gemeinsamen Listen</b>.</p>
+<ul>
+<li>Ein Doppelklick auf einen Eintrag öffnet das betroffene Produkt oder die Liste.</li>
+<li>Die Zahl in Klammern links in der Leiste zeigt, wie viel Neues es seit Ihrem letzten Besuch gibt.</li>
+</ul>"""),
+}
+
+
 STAR = "★"
 UD = Qt.ItemDataRole.UserRole
 ENTRY_ROLE = int(Qt.ItemDataRole.UserRole) + 1   # (Liste, Präfix) bei Gruppen-Einträgen
@@ -134,6 +201,7 @@ SHORTCUTS = (
     ("Strg+Umschalt+V", "Nummernliste einfügen"),
     ("Strg+0 / 1 / 2 / 3", "Startseite / Produkte / Versionen / Änderungen anderer"),
     ("F5", "neu laden"),
+    ("F1", "Hilfe zur aktuellen Seite"),
 )
 
 
@@ -226,6 +294,27 @@ QListWidget#clickList {{ background: {SURFACE}; }}
 QToolButton#viewToggle {{ border: 1px solid {LINE}; border-radius: 8px; padding: 4px 8px; background: {SURFACE}; }}
 QToolButton#viewToggle:checked {{ background: {MINT}; border-color: {GREEN}; }}
 QTextBrowser#comments {{ border: 1px solid {LINE}; border-radius: 10px; }}
+#header {{ border-bottom: none; }}
+#header QLabel#title {{ font-size: {FONT_PT + 9}pt; }}
+#search {{ border-radius: 24px; padding: 11px 20px; font-size: {FONT_PT + 2}pt; min-height: 26px; }}
+QPushButton {{ border-radius: 12px; padding: 9px 18px; min-height: 22px; }}
+#header QPushButton {{ border-radius: 22px; padding: 9px 18px; min-height: 22px; }}
+#header QPushButton#helpBtn {{ background: {GOLD}; color: #FFFFFF; border: none; font-weight: 700; }}
+#nav {{ border-right: none; }}
+#nav QToolButton {{ text-align: left; padding: 13px 14px; border-radius: 14px; }}
+#nav QToolButton:checked {{ background: {MINT}; color: {GREEN}; border-left: 5px solid {GREEN}; }}
+#nav QPushButton {{ text-align: left; padding: 11px 14px; }}
+#card {{ border-radius: 20px; }}
+QLineEdit, QPlainTextEdit, QComboBox {{ border-radius: 12px; padding: 8px 12px; }}
+QCheckBox, QRadioButton {{ spacing: 10px; }}
+QCheckBox::indicator, QRadioButton::indicator {{ width: 20px; height: 20px; }}
+QRadioButton::indicator {{ border-radius: 11px; }}
+QHeaderView::section {{ padding: 10px 8px; }}
+QMenu::item {{ padding: 9px 22px; }}
+QToolTip {{ padding: 10px; border-radius: 8px; }}
+QScrollBar:vertical {{ width: 15px; }}
+QScrollBar:horizontal {{ height: 15px; }}
+QLabel#helpTitle {{ font-size: {FONT_PT + 9}pt; font-weight: 700; color: {GREEN}; }}
 """
 
 
@@ -391,6 +480,24 @@ def _when(iso):
 
 def cat_color(cat):
     return cat["farbe"] if cat else None
+
+
+def highlight_html(text, terms, color):
+    """Text als HTML mit farbig hinterlegten Fundstellen (Groß/klein egal, überlappende Treffer zusammengefasst)."""
+    spans = sorted((m.start(), m.end()) for t in terms for m in re.finditer(re.escape(t), text, re.IGNORECASE))
+    merged = []
+    for a, b in spans:
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    out, pos = [], 0
+    for a, b in merged:
+        out.append(html.escape(text[pos:a]))
+        out.append(f"<span style='background:{color}; color:#000000'>{html.escape(text[a:b])}</span>")
+        pos = b
+    out.append(html.escape(text[pos:]))
+    return "".join(out).replace("\n", "<br>")
 
 
 def _tip(text):
@@ -597,8 +704,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"HMV-Viewer – Hilfsmittelverzeichnis  (v{__version__})")
         self.resize(1600, 940)
         self.settings = settings or QSettings("HMV-Viewer", "HMV-Viewer")   # je Windows-Benutzer
-        apply_view(self.settings.value("dichte", "Normal"), self.settings.value("schrift", 10))
-        apply_theme(self.settings.value("design", "Classic"))
+        if not self.settings.value("v26_modern"):   # einmalig: neue, größere Standard-Oberfläche für alle
+            for key, value in (("design", DEFAULT_THEME), ("schrift", 12), ("dichte", "Groß"), ("v26_modern", True)):
+                self.settings.setValue(key, value)
+        apply_view(self.settings.value("dichte", "Groß"), self.settings.value("schrift", 12))
+        apply_theme(self.settings.value("design", DEFAULT_THEME))
         self._icon_targets = []        # (Widget, Icon-Name, Farbname) – nach Designwechsel neu zeichnen
         self._undo = []                # (Beschreibung, Funktion) für Strg+Z
         self.recent = self._load_recent()
@@ -614,6 +724,8 @@ class MainWindow(QMainWindow):
         self._last_target = ("fav", None)
         self.design_actions = {}
         self.chips = {}
+        self._query_words = []      # Suchwörter für Fundstelle/Markierung
+        self._merk_links = []       # (Eigenschaft, Wert) der anklickbaren Merkmal-Zeilen im Detail
         self.names = None
         self.first_id = self.latest_id = None
         self.version_by_label = {}
@@ -662,8 +774,9 @@ class MainWindow(QMainWindow):
         self._restore_layout()
 
         self._open_store(fav_dir or self.settings.value("favoriten_ordner") or self._ask_first_folder(), reload=False)
-        self._set_user(user or self.settings.value("benutzer") or self._ask_user(first=True))
+        self._set_user(user or self.store.user_name or self.settings.value("benutzer") or self._ask_user())
         self._apply_icons()
+        self._add_shadows()
         self.reload_all()
         if not queries.list_versions(self.conn):
             QTimer.singleShot(300, self._offer_first_import)
@@ -689,15 +802,18 @@ class MainWindow(QMainWindow):
         lay.addLayout(titles)
         lay.addSpacing(24)
         self.search = QLineEdit(objectName="search", clearButtonEnabled=True)
-        self.search.setPlaceholderText("Produkte suchen – Bezeichnung, Hersteller, Nummer oder Notiz   Strg+F")
-        self.search.setMinimumWidth(380)
+        self.search.setPlaceholderText("Hier suchen, z. B. Rollator")
+        self.search.setToolTip("Alle Wörter müssen vorkommen; Wortanfang genügt (batt → Batterie), Zahlen nur als ganzes "
+                               "Wort (10 ≠ 100).\n\"Typ 10\" = genau diese Wortfolge · -netzabhängig = ausschließen · "
+                               "01.24.01 = Nummernbereich.\nWo gesucht wird, legen die Schalter „Suchen in“ fest.")
+        self.search.setMinimumWidth(240)
         self.search_icon = self.search.addAction(QIcon(), QLineEdit.ActionPosition.LeadingPosition)
         self.search.textChanged.connect(lambda: self.search_timer.start())
         self.search.returnPressed.connect(self.apply_filter)
         self.search.installEventFilter(self)
         lay.addWidget(self.search, 1)
-        palette = QPushButton("Strg+K", clicked=self.open_palette,
-                              toolTip="Schnellzugriff: Produkte, Gruppen, Listen und Funktionen")
+        palette = QPushButton("Schnellzugriff", clicked=self.open_palette,
+                              toolTip="Produkte, Gruppen, Listen und Funktionen schnell finden (Strg+K)")
         lay.addWidget(palette)
         lay.addSpacing(10)
         imp = QPushButton("Importieren", objectName="primary", clicked=self.start_import,
@@ -707,10 +823,13 @@ class MainWindow(QMainWindow):
         fav = QPushButton("Favoriten", clicked=self.show_favorites, toolTip="Strg+B")
         for w in (imp, exp, fav):
             lay.addWidget(w)
-        self.user_btn = QPushButton("Benutzer ▾", toolTip="Wer bin ich? Wird bei gemeinsamen Listen und Kommentaren angezeigt")
-        user_menu = QMenu(self.user_btn)
-        user_menu.aboutToShow.connect(lambda: self._fill_user_menu(user_menu))
-        self.user_btn.setMenu(user_menu)
+        self.user_btn = QPushButton("Benutzer", toolTip="Ihr Name – gespeichert in Ihrer Favoriten-Datei; erscheint bei "
+                                                        "gemeinsamen Listen und Kommentaren")
+        self.user_btn.clicked.connect(lambda: self._toast(
+            f"Angemeldet als {self.user} – der Name steht in Ihrer Favoriten-Datei ({self.store.path.name})"))
+        help_btn = QPushButton("Hilfe", objectName="helpBtn", clicked=self.show_help,
+                               toolTip="Erklärt die Seite, auf der Sie gerade sind (F1)")
+        lay.addWidget(help_btn)
         lay.addWidget(self.user_btn)
         menu_btn = QPushButton("Mehr ▾")
         menu = QMenu(menu_btn)
@@ -727,7 +846,7 @@ class MainWindow(QMainWindow):
         menu.addAction("Datenbank aus Sicherung wiederherstellen (NUR IM NOTFALL) …", self._restore_db)
         menu.addSeparator()
         design = menu.addMenu("Design")
-        current = self.settings.value("design", "Classic")
+        current = self.settings.value("design", DEFAULT_THEME)
         for name in THEME_NAMES:
             act = design.addAction(name, lambda name=name: self.set_theme(name))
             act.setCheckable(True)
@@ -735,13 +854,15 @@ class MainWindow(QMainWindow):
             self.design_actions[name] = act
         view = menu.addMenu("Ansicht")
         dens = view.addMenu("Zeilenhöhe")
-        cur_d = self.settings.value("dichte", "Normal")
+        cur_d = self.settings.value("dichte", "Groß")
         for name in DENSITY:
             act = dens.addAction(name, lambda name=name: self.set_view(density=name))
             act.setCheckable(True)
             act.setChecked(name == cur_d)
+        view.addAction(make_icon("search"), "Markierungsfarbe für Suchtreffer …", self._choose_mark_color)
+        view.addAction(make_icon("table"), "Spalten der Produktliste …", self._choose_columns)
         fonts = view.addMenu("Schriftgröße")
-        cur_f = int(self.settings.value("schrift", 10))
+        cur_f = int(self.settings.value("schrift", 12))
         for size in FONT_SIZES:
             act = fonts.addAction(f"{size} pt", lambda size=size: self.set_view(font_pt=size))
             act.setCheckable(True)
@@ -754,7 +875,8 @@ class MainWindow(QMainWindow):
         lay.addWidget(menu_btn)
         self._icon_targets += [(palette, "command", "HEADER_FG"), (imp, "import", "HEADER_PRIMARY_FG"),
                                (exp, "export", "HEADER_FG"), (fav, "star", "HEADER_FG"),
-                               (self.user_btn, "user", "HEADER_FG"), (menu_btn, "menu", "HEADER_FG")]
+                               (self.user_btn, "user", "HEADER_FG"), (menu_btn, "menu", "HEADER_FG"),
+                               (help_btn, "info", "HEADER_PRIMARY_BG")]
         return header
 
     def _apply_icons(self):
@@ -763,27 +885,56 @@ class MainWindow(QMainWindow):
         self.search_icon.setIcon(make_icon("search", MUTED))
 
     def _build_nav(self):
+        """Breite Leiste mit Klartext statt kleiner Symbole."""
         nav = QFrame(objectName="nav")
-        nav.setFixedWidth(116)
+        nav.setFixedWidth(262)
         lay = QVBoxLayout(nav)
-        lay.setContentsMargins(10, 14, 10, 14)
+        lay.setContentsMargins(14, 18, 14, 18)
+        lay.setSpacing(6)
         self.nav_group = QButtonGroup(self)
-        # id = Index im Stapel: 0 Produkte, 1 Versionen, 2 Startseite (steht oben), 3 Änderungen anderer
-        for i, text, icon, tip in ((2, "Start", "home", "Übersicht (Strg+0)"), (0, "Produkte", "box", "Strg+1"),
-                                   (1, "Versionen", "history", "Importe und Änderungen (Strg+2)"),
-                                   (3, "Änderungen\nanderer", "comment",
-                                    "Was andere Benutzer kommentiert, eingefärbt oder an Listen geändert haben (Strg+3)")):
+        for i, text, icon, tip in NAV:
             b = QToolButton(text=text, checkable=True, checked=(i == 0), toolTip=tip)
-            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-            b.setIconSize(QSize(22, 22))
+            b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            b.setIconSize(QSize(26, 26))
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            b.setMinimumHeight(64)
+            b.setMinimumHeight(56)
             self.nav_group.addButton(b, i)
             self._icon_targets.append((b, icon, "MUTED"))
             lay.addWidget(b)
         self.nav_group.idClicked.connect(self._goto_page_widget)
         lay.addStretch(1)
+        b = QPushButton("Hilfe zu dieser Seite", clicked=self.show_help)
+        self._icon_targets.append((b, "info", "GREEN"))
+        lay.addWidget(b)
         return nav
+
+    def show_help(self):
+        title, body = HELP.get(self.stack.currentIndex(), HELP[0])
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Hilfe – {title}")
+        dlg.resize(620, 520)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(28, 22, 28, 18)
+        lay.addWidget(QLabel(title, objectName="helpTitle"))
+        text = QTextBrowser()
+        text.setHtml(f"<div style='font-size:{FONT_PT + 1}pt; line-height:150%'>{body}</div>")
+        lay.addWidget(text, 1)
+        lay.addLayout(_row(QPushButton("Verstanden", objectName="primary", clicked=dlg.accept), stretch_at=0))
+        dlg.exec()
+
+    def _add_shadows(self):
+        """Weicher Schatten unter Karten – nicht bei Karten mit Tabellen/Listen (Schatten bremst dort das Scrollen)."""
+        for card in self.findChildren(QFrame, "card"):
+            if card.findChild(QAbstractItemView) or card.findChild(QTextBrowser):
+                continue
+            fx = QGraphicsDropShadowEffect(card, blurRadius=28, xOffset=0, yOffset=6)
+            fx.setColor(QColor(0, 60, 35, 40))
+            card.setGraphicsEffect(fx)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Mindestbreite nach dem Aufbau neu berechnen (sonst bleibt eine ältere, breitere stehen)
+        QTimer.singleShot(0, lambda: (self.layout().invalidate(), self.layout().activate()))
 
     def _goto_page_widget(self, i):
         self.nav_group.button(i).setChecked(True)
@@ -823,8 +974,7 @@ class MainWindow(QMainWindow):
         self.act_table = _table(cols)
         self.act_table.cellDoubleClicked.connect(lambda r, c: self._open_activity(r))
         self.act_empty = QLabel(objectName="empty", alignment=Qt.AlignmentFlag.AlignCenter, wordWrap=True)
-        self.act_empty.linkActivated.connect(lambda link: self.act_mine.setChecked(True) if link == "mine"
-                                             else self._set_user(self._ask_user()))
+        self.act_empty.linkActivated.connect(lambda link: self.act_mine.setChecked(True))
         self.act_stack = QStackedWidget()
         self.act_stack.addWidget(self.act_table)
         self.act_stack.addWidget(self.act_empty)
@@ -868,6 +1018,52 @@ class MainWindow(QMainWindow):
             self.settings.setValue("aktivitaet_gesehen", dt.datetime.now().isoformat(timespec="seconds"))
         self._update_activity_badge()
 
+    def _merkmale_html(self, text):
+        """Merkmale mit anklickbaren „Eigenschaft: Wert“-Zeilen (filtert alle Produkte mit genau diesem Wert)."""
+        if not text:
+            self._merk_links = []
+            return "–"
+        terms, color = self._search_terms(), self._mark_color()
+        self._merk_links, lines = [], []
+        for key, value in merkmale.parse_merkmale(text).items():
+            line = value if key == merkmale.FREE_TEXT else f"{key}: {value}"
+            body = highlight_html(line, terms, color)
+            if key != merkmale.FREE_TEXT and len(value) <= merkmale.MAX_VALUE:
+                self._merk_links.append((key, value))
+                # anklickbar: grün, unterstrichen, mit ▸ – Fließtext bleibt schwarz
+                body = (f"<span style='color:{GREEN}'>▸&nbsp;</span>"
+                        f"<a href='goto:merkmal:{len(self._merk_links) - 1}' style='color:{GREEN}; text-decoration:underline'"
+                        f" title='Alle Produkte mit „{html.escape(key)}: {html.escape(value)}“ zeigen'>{body}</a>")
+            lines.append(body)
+        hint = (f"<br><span style='color:{MUTED}; font-size:9pt'><span style='color:{GREEN}'>▸</span> Grün unterstrichene "
+                "Zeilen anklicken = alle Produkte mit genau dieser Angabe suchen</span>") if self._merk_links else ""
+        return "<br>".join(lines) + hint
+
+    def _search_line(self, key, value):
+        """Merkmal-Zeile aus den Details als genaue Phrase ins Suchfeld (Suche in Merkmalen)."""
+        self._goto_page_widget(0)
+        self.extra_nummern = None
+        self._quiet(self.chk_merk, self.chk_merk.setChecked, True)
+        self._quiet(self.hier, self.hier.setCurrentItem, self.all_item)
+        self._quiet(self.search, self.search.setText, '"' + f"{key}: {value}".replace('"', " ") + '"')
+        self.apply_filter()
+        self._toast(f"Alle Produkte mit „{key}: {value}“")
+
+    def _search_terms(self):
+        """Wörter, die in den Merkmalen markiert werden: Feld „Merkmale/Notizen“ und – bei Merkmal-Suche – die große Suche."""
+        return [t for t in self._query_words if len(t) > 1]
+
+    def _mark_color(self):
+        return self.settings.value("markierfarbe", DEFAULT_MARK_COLOR)
+
+    def _choose_mark_color(self):
+        color = QColorDialog.getColor(QColor(self._mark_color()), self, "Markierungsfarbe für Suchtreffer")
+        if color.isValid():
+            self.settings.setValue("markierfarbe", color.name())
+            if self.current_nummer:
+                self._show_detail(self.current_nummer)
+            self._toast("Markierungsfarbe gespeichert (nur auf diesem PC)")
+
     def _show_activity_empty(self, since, mine):
         """Leere Ansicht erklären – meist sind alle Einträge die eigenen (die hier ausgeblendet werden)."""
         if self.act_rows:
@@ -885,7 +1081,7 @@ class MainWindow(QMainWindow):
             text += "<p>Hier erscheint, was andere kommentieren, farblich markieren oder an gemeinsamen Listen ändern.</p>"
         if not others:
             text += ("<p>Bisher ist nur ein Benutzer angelegt. Sobald Kolleginnen und Kollegen mit ihrem Namen arbeiten, "
-                     f"erscheinen ihre Änderungen hier. <a href='user' style='color:{GREEN}'>Benutzer wechseln/anlegen …</a></p>")
+                     "erscheinen ihre Änderungen hier.</p>")
         self.act_empty.setText(text)
         self.act_stack.setCurrentWidget(self.act_empty)
 
@@ -896,7 +1092,7 @@ class MainWindow(QMainWindow):
         except sqlite3.OperationalError:
             return
         btn = self.nav_group.button(3)
-        btn.setText("Änderungen\nanderer" + (f" ({n if n < 100 else '99+'})" if n else ""))
+        btn.setText("Änderungen anderer" + (f" ({n if n < 100 else '99+'})" if n else ""))
 
     def _open_activity(self, row):
         a = self.act_rows[row]
@@ -922,7 +1118,7 @@ class MainWindow(QMainWindow):
 
     def _build_tree_card(self):
         card, lay = _card("Produktgruppen")
-        card.setMinimumWidth(250)
+        card.setMinimumWidth(240)
         self.hier_filter = QLineEdit(clearButtonEnabled=True, placeholderText="Filtern: Name oder Nummer, z. B. 10.50")
         self.hier_filter.setToolTip("Strg+G")
         self.hier_filter.textChanged.connect(lambda: self.hier_timer.start())
@@ -956,12 +1152,15 @@ class MainWindow(QMainWindow):
         self.btn_cards.clicked.connect(lambda: self.set_view_mode("karten"))
         self._icon_targets += [(self.btn_table, "table", "TEXT"), (self.btn_cards, "cards", "TEXT"),
                                (self.saved_btn, "search", "GREEN")]
-        lay.addLayout(_row(self.list_title, self.saved_btn, self.btn_table, self.btn_cards, stretch_at=1))
+        self.columns_btn = QPushButton("Spalten …", clicked=self._choose_columns,
+                                       toolTip="Spalten der Produktliste ein-/ausblenden (auch: Rechtsklick auf den Tabellenkopf)")
+        self._icon_targets.append((self.columns_btn, "table", "GREEN"))
+        lay.addLayout(_row(self.list_title, self.saved_btn, self.columns_btn, self.btn_table, self.btn_cards, stretch_at=1))
 
         self.cb_status = QComboBox(minimumWidth=130, toolTip="Aktive, entfernte oder alle Produkte")
         self.cb_status.addItems(list(STATUS_CHOICES))
-        self.cb_version = QComboBox(minimumWidth=210, toolTip="Nur Produkte, die sich in dieser Version geändert haben")
-        self.cb_type = QComboBox(minimumWidth=200)
+        self.cb_version = QComboBox(minimumWidth=150, toolTip="Nur Produkte, die sich in dieser Version geändert haben")
+        self.cb_type = QComboBox(minimumWidth=150)
         self.cb_type.addItems(list(TYPE_CHOICES))
         for cb in (self.cb_status, self.cb_version, self.cb_type):
             cb.activated.connect(lambda *_: self.apply_filter())
@@ -978,17 +1177,26 @@ class MainWindow(QMainWindow):
         completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
         completer.popup().setObjectName("completer")
         self.cb_hersteller.lineEdit().textChanged.connect(lambda: self.search_timer.start())
-        self.chk_merk = QCheckBox("Suche auch in Merkmalen", toggled=lambda *_: self.apply_filter())
+        def scope(text, key, default, tip):
+            b = QToolButton(text=text, objectName="viewToggle", checkable=True, toolTip=tip,
+                            checked=self.settings.value(key, default) in ("true", True))
+            b.toggled.connect(lambda on: (self.settings.setValue(key, on), self.apply_filter()))
+            return b
+
+        self.scope_bez = scope("Bezeichnung / Hersteller", "suche_bez", "true", "In Bezeichnung und Hersteller suchen")
+        self.chk_merk = scope("Merkmale", "merkmale_suche", "true", "In den Merkmalen suchen (Volltext-Index)")
+        self.scope_notes = scope("Notizen && Kommentare", "suche_notizen", "true", "In Ihren Notizen und den Kommentaren suchen")
         self.cb_kat = QComboBox(minimumWidth=150, toolTip="Nur Produkte mit dieser Farbkategorie (Ihre eigenen Kategorien)")
         self.cb_kat.activated.connect(lambda *_: self.apply_filter())
         reset = QPushButton("Filter zurücksetzen", clicked=self.reset_filter)
-        self.note_search = QLineEdit(clearButtonEnabled=True, minimumWidth=260,
-                                     placeholderText="Nur in Notizen und Kommentaren suchen")
-        self.note_search.setToolTip("Findet Produkte, deren eigene Notiz oder Kommentare diese Wörter enthalten. "
-                                    "Die große Suche oben findet sie ebenfalls.")
-        self.note_search.textChanged.connect(lambda: self.search_timer.start())
         lay.addLayout(_row(QLabel("Hersteller"), self.cb_hersteller, QLabel("Kategorie"), self.cb_kat, stretch_at=4))
-        lay.addLayout(_row(QLabel("Notizen"), self.note_search, self.chk_merk, reset, stretch_at=3))
+        self.chk_platzhalter = QCheckBox("„Nicht besetzt“ ausblenden",
+                                         checked=self.settings.value("ohne_platzhalter", "false") in ("true", True))
+        self.chk_platzhalter.setToolTip("Blendet die Platzhalter-Positionen des HMV mit der Bezeichnung „Nicht besetzt“ aus")
+        self.chk_platzhalter.toggled.connect(lambda on: (self.settings.setValue("ohne_platzhalter", on),
+                                                         self.apply_filter()))
+        lay.addLayout(_row(QLabel("Suchen in"), self.scope_bez, self.chk_merk, self.scope_notes, stretch_at=4))
+        lay.addLayout(_row(self.chk_platzhalter, reset, stretch_at=1))
 
         self.table = _table(PRODUCT_COLUMNS)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -997,7 +1205,8 @@ class MainWindow(QMainWindow):
         self.table.setDefaultDropAction(Qt.DropAction.CopyAction)
         hdr = self.table.horizontalHeader()
         hdr.setStretchLastSection(False)
-        hdr.setSectionResizeMode(COL["bezeichnung"], QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        hdr.setMinimumSectionSize(30)
         hdr.setSortIndicatorShown(True)
         hdr.setSectionsMovable(True)
         hdr.sectionClicked.connect(self._sort_by)
@@ -1032,7 +1241,7 @@ class MainWindow(QMainWindow):
 
         self.pager_label = QLabel(objectName="muted")
         chips = [QLabel("Letzte Version:", objectName="muted")]
-        for ctype in (NEU, GEAENDERT, REAKTIVIERT, ENTFERNT):
+        for ctype in (NEU, GEAENDERT, REAKTIVIERT, UMGRUPPIERT, ENTFERNT):
             chip = self.chips[ctype] = QLabel(CHANGE_LABELS[ctype], objectName="chip")
             chip.setStyleSheet(f"background: {TAG_COLORS[ctype]};")
             chips.append(chip)
@@ -1047,7 +1256,8 @@ class MainWindow(QMainWindow):
         self.cb_detail_kat.activated.connect(
             lambda *_: self.current_nummer and self._set_mark([self.current_nummer], self.cb_detail_kat.currentData()))
         self._icon_targets += [(self.btn_copy, "copy", "GREEN")]
-        lay.addLayout(_row(self.btn_fav, self.btn_copy, self.cb_detail_kat, stretch_at=2))
+        lay.addLayout(_row(self.btn_fav, self.btn_copy, stretch_at=2))
+        lay.addLayout(_row(self.cb_detail_kat, stretch_at=0))
 
         self.detail_tabs = QTabWidget()
         self.detail = QScrollArea(widgetResizable=True, frameShape=QFrame.Shape.NoFrame)
@@ -1156,7 +1366,7 @@ class MainWindow(QMainWindow):
         cols = (("id", "Version", 70), ("imported", "Importiert am", 150), ("stand", "Stand-Datum", 100),
                 ("logisch", "logische Vers.", 100), ("total", "Produkte", 90), ("neu", "Neu", 70),
                 ("geaendert", "Geändert", 80), ("entfernt", "Entfernt", 80), ("wieder", "Wieder aufgen.", 110),
-                ("stamm", "Änd. Stammdaten", 120), ("quelle", "Quelle", 300))
+                ("umgr", "Umgruppiert", 100), ("stamm", "Änd. Stammdaten", 120), ("quelle", "Quelle", 300))
         self.ver_table = _table(cols)
         self.ver_table.itemSelectionChanged.connect(self._load_version_changes)
         clay.addWidget(self.ver_table, 1)
@@ -1199,7 +1409,7 @@ class MainWindow(QMainWindow):
                         ("Ctrl+Shift+V", self._paste_numbers), ("Ctrl+0", lambda: self._goto_page_widget(2)),
                         ("Ctrl+1", lambda: self._goto_page_widget(0)), ("Ctrl+2", lambda: self._goto_page_widget(1)),
                         ("Ctrl+3", lambda: self._goto_page_widget(3)),
-                        ("F5", self.reload_all)):
+                        ("F5", self.reload_all), ("F1", self.show_help)):
             QShortcut(QKeySequence(seq), self, activated=fn)
         QShortcut(QKeySequence.StandardKey.Copy, self.table, activated=lambda: self._copy("table"),
                   context=Qt.ShortcutContext.WidgetShortcut)
@@ -1251,7 +1461,7 @@ class MainWindow(QMainWindow):
         sizes = self.settings.value("spalten")
         if sizes:
             self.split.setSizes([int(s) for s in sizes])
-        state = self.settings.value("tabelle_v3")
+        state = self.settings.value("tabelle_v4")
         if state is not None:
             self.table.horizontalHeader().restoreState(state)
         self.btn_cards.setChecked(self.view_mode == "karten")
@@ -1261,7 +1471,7 @@ class MainWindow(QMainWindow):
         self._save_note()
         self.settings.setValue("fenster", self.saveGeometry())
         self.settings.setValue("spalten", self.split.sizes())
-        self.settings.setValue("tabelle_v3", self.table.horizontalHeader().saveState())
+        self.settings.setValue("tabelle_v4", self.table.horizontalHeader().saveState())
         self.settings.setValue("zuletzt_geoeffnet", dt.datetime.now().isoformat(timespec="seconds"))
         super().closeEvent(event)
 
@@ -1311,6 +1521,8 @@ class MainWindow(QMainWindow):
             if self._persist(store.save) is None and self.store is not None:
                 return False
         self.store = store
+        if self.user is not None:   # Ordnerwechsel: Name aus der neuen Datei, sonst den bisherigen übernehmen
+            self._set_user(store.user_name or self.user)
         self.settings.setValue("favoriten_ordner", str(Path(folder)))
         self.store.attach(self.conn)
         self.fav_label.setText(f"{STAR} Favoriten: {store.path}")
@@ -1585,6 +1797,7 @@ class MainWindow(QMainWindow):
         key = self._current_key() or {}
         self.filter = ProductFilter(
             text=self.search.text().strip(), in_merkmale=self.chk_merk.isChecked(),
+            in_bez=self.scope_bez.isChecked(), in_notizen=self.scope_notes.isChecked(),
             status=STATUS_CHOICES.get(self.cb_status.currentText(), "aktiv"),
             gruppe=key.get("gruppe"), ort=key.get("ort"), untergruppe=key.get("untergruppe"), art=key.get("art"),
             import_id=self.version_by_label.get(self.cb_version.currentText()),
@@ -1592,7 +1805,8 @@ class MainWindow(QMainWindow):
             liste_id=key.get("liste"), pliste_id=key.get("pliste"),
             nummern=tuple(self.recent) if key.get("zuletzt") else self.extra_nummern,
             hersteller=self._hersteller_text(), kategorie=self.cb_kat.currentData(),
-            notiz_text=self.note_search.text().strip())
+            ohne_platzhalter=self.chk_platzhalter.isChecked())
+        self._query_words = merkmale.parse_query(self.filter.text).words if self.filter.in_merkmale else []
 
     def apply_filter(self):
         self.search_timer.stop()
@@ -1615,8 +1829,6 @@ class MainWindow(QMainWindow):
     def reset_filter(self):
         self.extra_nummern = None
         self._quiet(self.search, self.search.clear)
-        self._quiet(self.note_search, self.note_search.clear)
-        self._quiet(self.chk_merk, self.chk_merk.setChecked, False)
         self._quiet(self.cb_hersteller.lineEdit(), self.cb_hersteller.lineEdit().clear)
         self.cb_status.setCurrentIndex(0)
         self.cb_version.setCurrentIndex(0)
@@ -1653,14 +1865,15 @@ class MainWindow(QMainWindow):
 
     def _status_text(self, p):
         if not p["active"]:
-            return f"Entfernt in V{p['removed_import']}"
+            verb = "Umgruppiert" if p["last_change_type"] == UMGRUPPIERT else "Entfernt"
+            return f"{verb} in V{p['removed_import']}"
         if p["last_import_change"] == self.first_id and p["last_change_type"] == NEU:
             return "Erstimport"
         return f"{CHANGE_LABELS.get(p['last_change_type'], '')} in V{p['last_import_change']}"
 
     def _row_tag(self, p):
         if not p["active"]:
-            return ENTFERNT
+            return UMGRUPPIERT if p["last_change_type"] == UMGRUPPIERT else ENTFERNT
         if self.filter.import_id is not None:
             return None if self.filter.import_id == self.first_id else p["shown_type"]
         if p["last_import_change"] == self.latest_id and self.latest_id != self.first_id:
@@ -1696,7 +1909,7 @@ class MainWindow(QMainWindow):
         if self.filter.text:
             summary.append(f"Suche: „{self.filter.text}“")
         if self.filter.notiz_text:
-            summary.append(f"Notiz enthält: „{self.filter.notiz_text}“")
+            summary.append(f"Merkmale/Notizen enthalten: „{self.filter.notiz_text}“")
         if self.filter.liste_id in self.lists:
             summary.append("zuletzt geändert: " + _who(self.lists[self.filter.liste_id]))
         self.statusBar().showMessage("  ·  ".join(summary))
@@ -1729,7 +1942,8 @@ class MainWindow(QMainWindow):
         info = self.comment_info.get(nr)
         _fill_row(self.table, r, (
             self._star_for(nr), "", format_nummer(nr), p["bezeichnung"] or "",
-            p["hersteller"] or "", _clean(notes.get(nr)), f"({info[0]}) {_clean(info[1]['text'])}" if info else "",
+            p["hersteller"] or "", merkmale.fundstelle(p["merkmale"], self._query_words),
+            _clean(notes.get(nr)), f"({info[0]}) {_clean(info[1]['text'])}" if info else "",
             self.names.path(p)["art"], fmt_date(p["aufnahmedatum"]),
             fmt_date(p["aenderungsdatum"]), self._status_text(p)), TAG_COLORS.get(self._row_tag(p)))
         self._paint_mark(r, nr)
@@ -1787,26 +2001,48 @@ class MainWindow(QMainWindow):
         self.table.selectRow(self.row_nummer.index(nummer))
         self._product_menu(None)
 
-    def _column_menu(self, pos):
+    def _column_menu(self, _pos):
+        self._choose_columns()
+
+    def _choose_columns(self):
+        self._columns_dialog().exec()
+
+    def _columns_dialog(self):
+        """Häkchen je Spalte – Änderungen wirken sofort und werden beim Schließen des Programms gemerkt."""
         hdr = self.table.horizontalHeader()
-        menu = QMenu(self)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Spalten der Produktliste")
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(20, 16, 20, 14)
+        lay.addWidget(QLabel("Welche Spalten sollen angezeigt werden?", objectName="cardTitle"))
+        lay.addWidget(QLabel("Breite: Rand im Spaltenkopf ziehen · Doppelklick auf den Rand = passende Breite\n"
+                             "Reihenfolge: Spaltenkopf mit der Maus verschieben", objectName="muted"))
+        dlg.checks = {}
         for i, c in enumerate(PRODUCT_COLUMNS):
+            label = {"kat": "Farbkategorie (Farbfeld)", "fav": "Favorit (★)"}.get(c[0], c[1])
+            box = QCheckBox(label, checked=not hdr.isSectionHidden(i))
             if c[0] in ("nummer", "bezeichnung"):
-                continue   # Pflichtspalten
-            act = menu.addAction(c[1] or "Farbkategorie", lambda i=i: hdr.setSectionHidden(i, not hdr.isSectionHidden(i)))
-            act.setCheckable(True)
-            act.setChecked(not hdr.isSectionHidden(i))
-        menu.addSeparator()
-        menu.addAction("Standard wiederherstellen", self._reset_columns)
-        menu.exec(hdr.mapToGlobal(pos))
+                box.setEnabled(False)
+                box.setToolTip("Pflichtspalte")
+            box.toggled.connect(lambda on, i=i: hdr.setSectionHidden(i, not on))
+            dlg.checks[c[0]] = box
+            lay.addWidget(box)
+
+        def reset():
+            self._reset_columns()
+            for c in PRODUCT_COLUMNS:
+                self._quiet(dlg.checks[c[0]], dlg.checks[c[0]].setChecked, True)
+
+        lay.addLayout(_row(QPushButton("Standard wiederherstellen", clicked=reset),
+                           QPushButton("Schließen", objectName="primary", clicked=dlg.accept), stretch_at=1))
+        return dlg
 
     def _reset_columns(self):
         hdr = self.table.horizontalHeader()
         for i, c in enumerate(PRODUCT_COLUMNS):
             hdr.setSectionHidden(i, False)
             hdr.moveSection(hdr.visualIndex(i), i)
-            if c[0] != "bezeichnung":
-                self.table.setColumnWidth(i, c[2])
+            self.table.setColumnWidth(i, c[2])
 
     def _show_empty_state(self):
         if self.total:
@@ -2154,15 +2390,16 @@ class MainWindow(QMainWindow):
             self.settings.setValue("dichte", density)
         if font_pt:
             self.settings.setValue("schrift", int(font_pt))
-        apply_view(self.settings.value("dichte", "Normal"), self.settings.value("schrift", 10))
+        apply_view(self.settings.value("dichte", "Groß"), self.settings.value("schrift", 12))
         for t in (self.table, self.ver_table, self.chg_table):
             t.verticalHeader().setDefaultSectionSize(ROW_H)
         self._restyle()
         self._toast("Ansicht geändert (Zeilenhöhe/Schriftgröße)")
 
     def _restyle(self):
-        apply_theme(self.settings.value("design", "Classic"))
+        apply_theme(self.settings.value("design", DEFAULT_THEME))
         self._apply_icons()
+        self._add_shadows()
         for ctype, chip in self.chips.items():
             chip.setStyleSheet(f"background: {TAG_COLORS[ctype]}; color: {TEXT};")
         current = self.current_nummer
@@ -2171,15 +2408,12 @@ class MainWindow(QMainWindow):
             self.table.selectRow(self.row_nummer.index(current))
 
     # ------------------------------------------------------------------ Benutzer
-    def _ask_user(self, first=False):
-        names = queries.list_users(self.conn)
-        text = ("Bitte Ihren Nachnamen wählen oder neu eintippen (kein Passwort nötig).\n"
-                "Er wird bei gemeinsamen Listen und Notizen als „zuletzt geändert von“ angezeigt.")
-        name, ok = QInputDialog.getItem(self, "Benutzer anmelden" if first else "Benutzer wechseln / anlegen",
-                                        text, names, max(0, names.index(self.user)) if self.user in names else 0, True)
-        if ok and name.strip():
-            return name
-        return getpass.getuser() if first else None   # ohne Angabe: Windows-Anmeldename
+    def _ask_user(self):
+        """Einmalig beim ersten Start: Nachname, der danach in der eigenen Favoriten-Datei steht."""
+        name, ok = QInputDialog.getText(
+            self, "Ihr Name", "Bitte Ihren Nachnamen eingeben (kein Passwort nötig).\n"
+            "Er wird in Ihrer Favoriten-Datei gespeichert und bei gemeinsamen Listen und Kommentaren angezeigt.")
+        return name.strip() if ok and name.strip() else getpass.getuser()   # ohne Angabe: Windows-Anmeldename
 
     def _set_user(self, name):
         if not name:
@@ -2192,18 +2426,11 @@ class MainWindow(QMainWindow):
         if stored is None:
             stored = name   # DB schreibgeschützt: Name trotzdem für diese Sitzung verwenden
         self.user = stored
-        self.settings.setValue("benutzer", stored)
-        self.user_btn.setText(f"{stored} ▾")
+        if self.store.user_name != stored:   # Name gehört zur Favoriten-Datei, nicht zum PC
+            self.store.user_name = stored
+            self._persist(self.store.save)
+        self.user_btn.setText(stored)
         self.statusBar().showMessage(f"Angemeldet als {stored}", 4000)
-
-    def _fill_user_menu(self, menu):
-        menu.clear()
-        for name in queries.list_users(self.conn):
-            act = menu.addAction(name, lambda name=name: self._set_user(name))
-            act.setCheckable(True)
-            act.setChecked(name == self.user)
-        menu.addSeparator()
-        menu.addAction("Neuen Benutzer anlegen / wechseln …", lambda: self._set_user(self._ask_user()))
 
     # ------------------------------------------------------------------ Sicherung der gemeinsamen Datenbank
     def _backup_db(self):
@@ -2330,7 +2557,12 @@ class MainWindow(QMainWindow):
             out += [(make_icon("history", MUTED), format_nummer(nr), "zuletzt angesehen",
                      lambda nr=nr: self._open_product(nr)) for nr in self.recent[:8]]
             return out
-        for r in queries.fetch_products(self.conn, ProductFilter(text=text, status="alle"), limit=15):
+        hits = queries.fetch_products(self.conn, ProductFilter(text=text, status="alle"), limit=15)
+        if len(hits) < 15 and self.chk_merk.isChecked():
+            seen = {r["nummer"] for r in hits}
+            hits += [r for r in queries.fetch_products(self.conn, ProductFilter(text=text, status="alle", in_merkmale=True),
+                                                       limit=30) if r["nummer"] not in seen][:15 - len(hits)]
+        for r in hits:
             out.append((make_icon("box", TEXT), f"{format_nummer(r['nummer'])}  {r['bezeichnung'] or ''}",
                         r["hersteller"] or "", lambda nr=r["nummer"]: self._open_product(nr)))
         groups = [n for n in self.node_by_key.values() if term in n["label"].casefold()][:10]
@@ -2421,7 +2653,8 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ gespeicherte Suchen
     def _search_state(self):
-        return {"text": self.search.text(), "notiz": self.note_search.text(), "merk": self.chk_merk.isChecked(),
+        return {"text": self.search.text(), "merk": self.chk_merk.isChecked(), "bez": self.scope_bez.isChecked(),
+                "notizen": self.scope_notes.isChecked(),
                 "status": self.cb_status.currentText(), "version": self.cb_version.currentText(),
                 "typ": self.cb_type.currentText(), "hersteller": self._hersteller_text(),
                 "kategorie": self.cb_kat.currentData(), "bereich": self._current_key() or {}}
@@ -2430,8 +2663,9 @@ class MainWindow(QMainWindow):
         self._goto_page_widget(0)
         self.extra_nummern = None
         self._quiet(self.search, self.search.setText, st.get("text", ""))
-        self._quiet(self.note_search, self.note_search.setText, st.get("notiz", ""))
         self._quiet(self.chk_merk, self.chk_merk.setChecked, bool(st.get("merk")))
+        self._quiet(self.scope_bez, self.scope_bez.setChecked, st.get("bez", True))
+        self._quiet(self.scope_notes, self.scope_notes.setChecked, st.get("notizen", True))
         self.cb_status.setCurrentText(st.get("status", "Nur aktive"))
         self.cb_version.setCurrentText(st.get("version", ALL_VERSIONS))
         self.cb_type.setCurrentText(st.get("typ", "Alle Änderungstypen"))
@@ -2554,7 +2788,7 @@ class MainWindow(QMainWindow):
             if v["id"] == self.first_id:
                 continue
             chart.append((f"V{v['id']}", {NEU: v["n_new"], GEAENDERT: v["n_changed"], ENTFERNT: v["n_removed"],
-                                          REAKTIVIERT: v["n_reactivated"]}))
+                                          REAKTIVIERT: v["n_reactivated"], UMGRUPPIERT: v["n_regrouped"]}))
         self.chart.set_data(chart)
         recent = []
         for nr in self.recent[:8]:
@@ -2674,6 +2908,9 @@ class MainWindow(QMainWindow):
         self._container_remove(("fav", None), nummern)
 
     def _on_detail_link(self, target):
+        if target.startswith("merkmal:"):
+            self._search_line(*self._merk_links[int(target.split(":", 1)[1])])
+            return
         if target.startswith("produkt:"):
             self._open_product(target.split(":", 1)[1])
             return
@@ -2787,7 +3024,8 @@ class MainWindow(QMainWindow):
             return f"<a href='goto:{target}' style='color:{GREEN}'>{esc(text)}</a>"
 
         self.detail_title.setText(p["bezeichnung"] or "(ohne Bezeichnung)")
-        tag = self._row_tag(p)
+        listed = next((r for r in self.loaded_rows if r["nummer"] == nummer), None)
+        tag = self._row_tag(listed) if listed is not None else None
         chips = [("aktiv" if p["active"] else "entfernt", MINT if p["active"] else TAG_COLORS[ENTFERNT])]
         if tag:
             chips.append((CHANGE_LABELS[tag], TAG_COLORS[tag]))
@@ -2808,7 +3046,9 @@ class MainWindow(QMainWindow):
             ("Untergruppe", link("untergruppe", path["untergruppe"])), ("Produktart", link("art", path["art"])),
             ("Aufnahme", fmt_date(p["aufnahmedatum"])), ("Änderung (HMV)", fmt_date(p["aenderungsdatum"]) or "–"),
             ("Status", esc(self._status_text(p)))]))
-        self.sec_merk.set_html(esc(p["merkmale"] or "–").replace("\n", "<br>"))
+        self.sec_merk.set_html(self._merkmale_html(p["merkmale"]))
+        if self._query_words:
+            QTimer.singleShot(0, lambda: self.detail.ensureWidgetVisible(self.sec_merk, 0, 40))
         in_lists = queries.lists_for_product(self.conn, nummer)
         mine = [(lid, v["name"]) for lid, v in self.store.plists.items()
                 if nummer in v["items"] or any(len(k) < 10 and nummer.startswith(k) for k in v["items"])]
@@ -2979,7 +3219,7 @@ class MainWindow(QMainWindow):
             _fill_row(self.ver_table, r, (
                 f"V{v['id']}", (v["imported_at"] or "").replace("T", " "), fmt_date(v["source_date"]),
                 v["logische_version"] or "", _dots(v["n_total"]), v["n_new"], v["n_changed"], v["n_removed"],
-                v["n_reactivated"], v["n_stamm_changes"], v["source_name"] or ""))
+                v["n_reactivated"], v["n_regrouped"], v["n_stamm_changes"], v["source_name"] or ""))
         self.ver_table.blockSignals(False)
         if versions:
             self.ver_table.selectRow(0)
@@ -3099,7 +3339,8 @@ class MainWindow(QMainWindow):
             return
         text = (f"Version {res.import_id} importiert – {_dots(res.n_total)} Produkte in der Datei.\n\n"
                 f"Neu:  {res.n_new}\nGeändert:  {res.n_changed}\nEntfernt:  {res.n_removed}\n"
-                f"Wieder aufgenommen:  {res.n_reactivated}\nUnverändert:  {_dots(res.n_unchanged)}\n"
+                f"Wieder aufgenommen:  {res.n_reactivated}\nUmgruppiert (neue Nummer):  {res.n_regrouped}\n"
+                f"Unverändert:  {_dots(res.n_unchanged)}\n"
                 f"Änderungen an Gruppen/Orten/Untergruppen/Arten:  {res.n_stamm_changes}")
         if res.warnings:
             text += f"\n\n{len(res.warnings)} Warnung(en), z. B.: {res.warnings[0]}"
@@ -3189,7 +3430,7 @@ def setup_app(theme=None):
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("HMV-Viewer")
     app.setStyle("Fusion")
-    apply_theme(theme or "Classic")   # das Hauptfenster stellt danach die gespeicherte Farbwelt ein
+    apply_theme(theme or DEFAULT_THEME)   # das Hauptfenster stellt danach die gespeicherte Farbwelt ein
     return app
 
 

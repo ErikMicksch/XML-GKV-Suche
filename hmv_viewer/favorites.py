@@ -31,6 +31,7 @@ class FavoriteStore:
         self.plists: dict[str, dict] = {}  # id -> {"name", "parent" (id oder None), "items": {k: hinzugefügt am}}
         self.searches: dict[str, dict] = {}  # Name -> gespeicherter Filterzustand
         self.abos: list[int] = []            # abonnierte gemeinsame Listen (Hinweis bei Änderungen)
+        self.user_name: str | None = None    # Nachname des Benutzers (einmalig beim ersten Start festgelegt)
         self.recovered: Path | None = None  # Sicherung einer unlesbaren Datei
         self.is_new = not self.path.exists()
         if not self.is_new:
@@ -51,6 +52,7 @@ class FavoriteStore:
                            for k, v in data.get("listen", {}).items()}
             self.searches = {str(k): dict(v) for k, v in data.get("suchen", {}).items()}
             self.abos = [int(x) for x in data.get("abos", [])]
+            self.user_name = str(data["benutzer"]).strip() or None if data.get("benutzer") else None
         except (ValueError, AttributeError, KeyError, TypeError):
             # Datei kaputt: nicht überschreiben, sondern beiseitelegen und leer weitermachen
             stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -64,7 +66,7 @@ class FavoriteStore:
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps({"version": 4, "favoriten": self.favs, "notizen": self.notes,
                                    "kategorien": self.categories, "markierungen": self.marks, "listen": self.plists,
-                                   "suchen": self.searches, "abos": self.abos},
+                                   "suchen": self.searches, "abos": self.abos, "benutzer": self.user_name},
                                   ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
         os.replace(tmp, self.path)   # atomar: bei Absturz bleibt die alte Datei vollständig
         self.is_new = False

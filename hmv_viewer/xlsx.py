@@ -11,9 +11,9 @@ import zipfile
 from xml.sax.saxutils import escape
 
 # Zell-Formate (Index in cellXfs)
-DEFAULT, HEADER, DATE, WRAP, FILL_NEU, FILL_GEAENDERT, FILL_ENTFERNT, FILL_REAKTIVIERT = range(8)
+DEFAULT, HEADER, DATE, WRAP, FILL_NEU, FILL_GEAENDERT, FILL_ENTFERNT, FILL_REAKTIVIERT, FILL_UMGRUPPIERT = range(9)
 FILL_BY_CHANGE = {"NEU": FILL_NEU, "GEAENDERT": FILL_GEAENDERT,
-                  "ENTFERNT": FILL_ENTFERNT, "REAKTIVIERT": FILL_REAKTIVIERT}
+                  "ENTFERNT": FILL_ENTFERNT, "REAKTIVIERT": FILL_REAKTIVIERT, "UMGRUPPIERT": FILL_UMGRUPPIERT}
 
 _EPOCH = dt.date(1899, 12, 30)
 _ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
@@ -179,11 +179,12 @@ _STYLES = (
     '<numFmts count="1"><numFmt numFmtId="164" formatCode="DD.MM.YYYY"/></numFmts>'
     '<fonts count="2"><font><sz val="11"/><name val="Calibri"/></font>'
     '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font></fonts>'
-    '<fills count="7"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>'
-    + _fill("1F4E78") + _fill("E2F0D9") + _fill("FFF2CC") + _fill("F8CBAD") + _fill("DDEBF7") + '</fills>'
+    '<fills count="8"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>'
+    + _fill("1F4E78") + _fill("E2F0D9") + _fill("FFF2CC") + _fill("F8CBAD") + _fill("DDEBF7") + _fill("E4DCF3")
+    + '</fills>'
     '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
     '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-    '<cellXfs count="8">'
+    '<cellXfs count="9">'
     '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
     '<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" applyFont="1" applyFill="1" applyAlignment="1">'
     '<alignment vertical="center" wrapText="1"/></xf>'
@@ -194,6 +195,7 @@ _STYLES = (
     '<xf numFmtId="0" fontId="0" fillId="4" borderId="0" xfId="0" applyFill="1"/>'
     '<xf numFmtId="0" fontId="0" fillId="5" borderId="0" xfId="0" applyFill="1"/>'
     '<xf numFmtId="0" fontId="0" fillId="6" borderId="0" xfId="0" applyFill="1"/>'
+    '<xf numFmtId="0" fontId="0" fillId="7" borderId="0" xfId="0" applyFill="1"/>'
     '</cellXfs>'
     '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
     '</styleSheet>'

@@ -8,6 +8,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Iterator
 
+from . import merkmale
 from .model import ENTITY_LABELS, FIELD_LABELS, format_nummer
 
 ORDER_COLUMNS = {
@@ -26,7 +27,9 @@ ORDER_COLUMNS = {
 @dataclass
 class ProductFilter:
     text: str = ""
-    in_merkmale: bool = False
+    in_merkmale: bool = False      # Suchbereich Merkmale (Volltext-Index)
+    in_bez: bool = True            # Suchbereich Bezeichnung/Hersteller (Volltext-Index)
+    in_notizen: bool = True        # Suchbereich eigene Notizen + Kommentare
     status: str = "aktiv"          # aktiv | entfernt | alle
     gruppe: int | None = None
     ort: int | None = None
@@ -39,8 +42,9 @@ class ProductFilter:
     liste_id: int | None = None    # nur Produkte dieser gemeinsamen Liste
     kategorie: str | None = None   # nur Produkte mit dieser persönlichen Farbkategorie
     pliste_id: str | None = None   # nur Produkte dieser privaten Liste (Favoriten-Datei)
-    notiz_text: str = ""           # nur Produkte, deren eigene Notiz oder Kommentare diese Wörter enthalten
+    notiz_text: str = ""           # nur Produkte, deren Merkmale, eigene Notiz oder Kommentare diese Wörter enthalten
     nummern: tuple | None = None   # nur diese Produktnummern (z. B. „Zuletzt angesehen“, eingefügte Nummernliste)
+    ohne_platzhalter: bool = False # „Nicht besetzt“-Positionen des HMV ausblenden
 
 
 def _like(term: str) -> str:
@@ -60,6 +64,16 @@ _NOTE_CLAUSE = ("(p.nummer IN (SELECT k FROM notiz WHERE fold(text) LIKE ? ESCAP
                 " OR p.nummer IN (SELECT nummer FROM kommentar WHERE fold(text) LIKE ? ESCAPE '\\'))")
 
 
+MERKMALE_GEAENDERT = "GEAENDERT_MERKMALE"   # Pseudo-Änderungstyp: geändert UND Merkmale betroffen
+
+
+def _type_cond(alias: str, change_type: str):
+    """SQL-Bedingung für einen Änderungstyp (auch „Geändert – Merkmale“) auf die History-Tabelle alias."""
+    if change_type == MERKMALE_GEAENDERT:
+        return f"{alias}.change_type='GEAENDERT' AND json_extract({alias}.changes, '$.MERKMALE') IS NOT NULL", []
+    return f"{alias}.change_type=?", [change_type]
+
+
 def _build(f: ProductFilter):
     """Gibt (join_sql, where_sql, params) zurück. Tabellen-Alias: p (produkt), h (history)."""
     join, where, params = "", [], []
@@ -67,11 +81,13 @@ def _build(f: ProductFilter):
         join = " JOIN history h ON h.entity='PRODUKT' AND h.k=p.nummer AND h.import_id=?"
         params.append(f.import_id)
         if f.change_type:
-            where.append("h.change_type=?")
-            params.append(f.change_type)
+            cond, extra = _type_cond("h", f.change_type)
+            where.append(cond)
+            params += extra
     elif f.change_type:
-        where.append("p.nummer IN (SELECT k FROM history WHERE entity='PRODUKT' AND change_type=?)")
-        params.append(f.change_type)
+        cond, extra = _type_cond("hx", f.change_type)
+        where.append(f"p.nummer IN (SELECT hx.k FROM history hx WHERE hx.entity='PRODUKT' AND {cond})")
+        params += extra
 
     if f.favoriten:
         where.append(_member("SELECT k FROM favorit"))
@@ -87,6 +103,8 @@ def _build(f: ProductFilter):
     if f.liste_id is not None:
         where.append(_member("SELECT nummer AS k FROM liste_eintrag WHERE liste_id=?"))
         params += [f.liste_id] * 2
+    if f.ohne_platzhalter:
+        where.append("COALESCE(fold(trim(p.bezeichnung)), '') <> 'nicht besetzt'")
     if f.status == "aktiv":
         where.append("p.active=1")
     elif f.status == "entfernt":
@@ -103,26 +121,31 @@ def _build(f: ProductFilter):
         params.append(_like(f.hersteller.strip().casefold()))
 
     for term in f.notiz_text.split():
-        where.append(_NOTE_CLAUSE)
-        params += [_like(term.casefold())] * 2
+        where.append(f"(fold(p.merkmale) LIKE ? ESCAPE '\\' OR {_NOTE_CLAUSE})")
+        params += [_like(term.casefold())] * 3
 
-    for term in f.text.split():
-        clauses = ["fold(p.bezeichnung) LIKE ? ESCAPE '\\'", "fold(p.hersteller) LIKE ? ESCAPE '\\'"]
-        params += [_like(term.casefold())] * 2
-        clauses.append(_NOTE_CLAUSE)   # eigene und gemeinsame Notizen
-        params += [_like(term.casefold())] * 2
-        if f.in_merkmale:
-            clauses.append("fold(p.merkmale) LIKE ? ESCAPE '\\'")
-            params.append(_like(term.casefold()))
-        digits = term.replace(".", "")
-        if digits.isdigit():
-            if "." in term:   # 01.24.01 -> Präfix-Suche in der Hilfsmittelnummer
-                clauses.append("p.nummer LIKE ? ESCAPE '\\'")
-                params.append(digits + "%")
-            else:
-                clauses.append("p.nummer LIKE ? ESCAPE '\\'")
-                params.append(_like(digits))
-        where.append("(" + " OR ".join(clauses) + ")")
+    if f.text.strip():
+        # Volltext-Index (merkmale.py): Wortanfang, Zahlen nur ganz, "Phrase", -Ausschluss, vereinheitlicht
+        q = merkmale.parse_query(f.text)
+        found, found_params = [], []
+        columns = [c for c, on in (("bez", f.in_bez), ("merk", f.in_merkmale)) if on]
+        expr = q.fts(columns) if columns else None
+        if expr:
+            found.append(merkmale.FTS_MATCH)
+            found_params.append(expr)
+        if f.in_notizen and q.words:   # Notizen/Kommentare sind klein -> einfache Teiltext-Suche, alle Wörter
+            found.append("(" + " AND ".join([_NOTE_CLAUSE] * len(q.words)) + ")")
+            for w in q.words:
+                found_params += [_like(w.casefold())] * 2
+        if found:
+            where.append("(" + " OR ".join(found) + ")")
+            params += found_params
+        elif q.include or q.words:
+            where.append("0")   # gesucht, aber kein Suchbereich gewählt
+        for number in q.numbers:
+            digits = number.replace(".", "")
+            where.append("p.nummer LIKE ?")
+            params.append(digits + "%" if "." in number or len(digits) == 10 else _like(digits))
     return join, (" WHERE " + " AND ".join(where)) if where else "", params
 
 
@@ -203,10 +226,11 @@ def product_history(conn, nummer: str) -> list[dict]:
 
 
 def count_changes(conn, import_id: int, change_type: str | None = None) -> int:
-    sql, params = "SELECT COUNT(*) FROM history WHERE import_id=?", [import_id]
+    sql, params = "SELECT COUNT(*) FROM history h WHERE h.import_id=?", [import_id]
     if change_type:
-        sql += " AND change_type=?"
-        params.append(change_type)
+        cond, extra = _type_cond("h", change_type)
+        sql += " AND " + cond
+        params += extra
     return conn.execute(sql, params).fetchone()[0]
 
 
@@ -218,8 +242,9 @@ def version_changes(conn, import_id: int, change_type: str | None = None, limit:
            " WHERE h.import_id=?")
     params: list = [import_id]
     if change_type:
-        sql += " AND h.change_type=?"
-        params.append(change_type)
+        cond, extra = _type_cond("h", change_type)
+        sql += " AND " + cond
+        params += extra
     sql += " ORDER BY (h.entity='PRODUKT'), h.entity, h.k LIMIT ?"
     params.append(limit)
     out = []

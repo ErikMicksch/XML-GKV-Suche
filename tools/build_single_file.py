@@ -19,7 +19,7 @@ TEMPLATE = '''#!/usr/bin/env python3
 """HMV-Viewer {version} - Hilfsmittelverzeichnis einsehen, versionieren, nach Excel exportieren.
 
 Einzeldatei: einfach starten mit   python hmv_viewer_app.py   (Windows: Doppelklick bzw. py hmv_viewer_app.py)
-Benoetigt nur Python 3.9+ mit tkinter. Keine Installation, keine Admin-Rechte.
+Benoetigt Python 3.9+ mit PySide6. Keine Installation, keine Admin-Rechte.
 Die Datenbank liegt im Ordner "data" neben dieser Datei.
 
 AUTOMATISCH ERZEUGT aus dem Projekt (tools/build_single_file.py) - nicht von Hand bearbeiten.
@@ -84,8 +84,8 @@ def main():
     version = None
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-        for f in sorted(PKG.glob("*.py")):
-            z.write(f, f"hmv_viewer/{f.name}")
+        for f in sorted(p for p in PKG.rglob("*") if p.suffix in (".py", ".qml") and "__pycache__" not in p.parts):
+            z.write(f, "hmv_viewer/" + f.relative_to(PKG).as_posix())
             if f.name == "__init__.py":
                 for line in f.read_text(encoding="utf-8").splitlines():
                     if line.startswith("__version__"):

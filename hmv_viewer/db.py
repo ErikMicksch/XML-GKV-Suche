@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS imports(
     n_removed        INTEGER DEFAULT 0,
     n_reactivated    INTEGER DEFAULT 0,
     n_unchanged      INTEGER DEFAULT 0,
-    n_stamm_changes  INTEGER DEFAULT 0       -- Änderungen an Gruppen/Orten/Untergruppen/Arten
+    n_stamm_changes  INTEGER DEFAULT 0,      -- Änderungen an Gruppen/Orten/Untergruppen/Arten
+    n_regrouped      INTEGER DEFAULT 0       -- umgruppierte Produkte (neue Nummer)
 );
 
 CREATE TABLE IF NOT EXISTS produkt(
@@ -185,6 +186,28 @@ def ensure_schema(conn):
     conn.executescript(TEMP_SCHEMA)
     _migrate_lists(conn)
     _migrate_shared_notes(conn)
+    _migrate_regroupings(conn)
+    from . import merkmale
+    merkmale.ensure(conn)   # Volltext-Index + Eigenschaft/Wert (einmalig aufbauen, falls leer)
+
+
+def _migrate_regroupings(conn):
+    """v2.3 -> v2.4: Spalte n_regrouped und einmalige Erkennung von Umgruppierungen in vorhandenen Versionen."""
+    if "n_regrouped" in {r[1] for r in conn.execute("PRAGMA table_info(imports)")}:
+        return
+    from .importer import detect_regroupings
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if "n_regrouped" not in {r[1] for r in conn.execute("PRAGMA table_info(imports)")}:   # evtl. parallel erledigt
+            conn.execute("ALTER TABLE imports ADD COLUMN n_regrouped INTEGER DEFAULT 0")
+            for (imp_id,) in conn.execute("SELECT id FROM imports ORDER BY id").fetchall():
+                n = detect_regroupings(conn, imp_id)
+                conn.execute("UPDATE imports SET n_regrouped=?, n_new=n_new-?, n_removed=n_removed-? WHERE id=?",
+                             (n, n, n, imp_id))
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
 
 
 def _migrate_shared_notes(conn):

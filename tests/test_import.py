@@ -105,7 +105,10 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(favoriten=True)), 4)
         self.assertFalse(store.toggle("0124010002"))
         store.set_note("0124010003", " Hinweis notiert ")
+        store.user_name = "Meier"
+        store.save()
         again = FavoriteStore(folder)
+        self.assertEqual(again.user_name, "Meier")
         self.assertEqual(set(again.favs), {"0124"})
         self.assertEqual(again.notes, {"0124010003": "Hinweis notiert"})
         # kaputte Datei wird gesichert, nicht überschrieben
@@ -226,6 +229,65 @@ class ImportTests(unittest.TestCase):
         self.assertEqual([r["nummer"] for r in queries.fetch_products(conn, f)], ["0124010003"])
         conn.close()
 
+    def test_regrouping_and_filters(self):
+        import json
+        import sqlite3
+        importer.import_file(self.conn, self.v1)
+        v3 = write_sample(os.path.join(self.tmp, "20260301_HMV.xml"), 3)
+        r = importer.import_file(self.conn, v3)
+        self.assertEqual((r.n_regrouped, r.n_new, r.n_removed), (1, 1, 1))     # Platzhalter 4 -> 8 bleibt neu/entfernt
+        changes = self.conn.execute("SELECT changes FROM history WHERE k='0124010007'").fetchone()[0]
+        self.assertEqual(json.loads(changes), {"NUMMER": ["01.24.01.0002", "01.24.01.0007"]})
+        self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(status="alle", change_type="UMGRUPPIERT")), 2)
+        self.assertEqual(queries.count_changes(self.conn, r.import_id, "UMGRUPPIERT"), 2)
+        # „Nicht besetzt“ ausblenden
+        self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(ohne_platzhalter=True)), 3)
+        # einmalige Nachbearbeitung älterer Datenbanken (Spalte fehlt, History noch NEU/ENTFERNT)
+        self.conn.execute("UPDATE history SET change_type='NEU', changes=NULL WHERE k='0124010007'")
+        self.conn.execute("UPDATE history SET change_type='ENTFERNT', changes=NULL WHERE k='0124010002' AND import_id=2")
+        self.conn.execute("ALTER TABLE imports DROP COLUMN n_regrouped")
+        self.conn.close()
+        self.conn = db.connect(os.path.join(self.tmp, "t.db"))
+        self.assertEqual(queries.list_versions(self.conn)[0]["n_regrouped"], 1)
+        self.assertEqual(queries.count_changes(self.conn, 2, "UMGRUPPIERT"), 2)
+
+    def test_changed_merkmale_only(self):
+        importer.import_file(self.conn, self.v1)
+        importer.import_file(self.conn, self.v2)   # Pumpe A: nur Merkmale geändert
+        # Pumpe C: nur Bezeichnung geändert -> darf bei „Geändert – Merkmale“ NICHT erscheinen
+        self.conn.execute("INSERT INTO history(import_id, entity, k, change_type, changes) VALUES"
+                          " (2, 'PRODUKT', '0124010003', 'GEAENDERT', '{\"BEZEICHNUNG\": [\"a\", \"b\"]}')")
+        self.assertEqual(queries.count_changes(self.conn, 2, "GEAENDERT"), 3)   # Gruppe, Pumpe A, Pumpe C
+        f = queries.ProductFilter(status="alle", change_type=queries.MERKMALE_GEAENDERT)
+        self.assertEqual([p["nummer"] for p in queries.fetch_products(self.conn, f)], ["0124010001"])
+        self.assertEqual(queries.count_changes(self.conn, 2, queries.MERKMALE_GEAENDERT), 1)
+
+    def test_fulltext_and_properties(self):
+        from hmv_viewer import merkmale
+        importer.import_file(self.conn, self.v1)
+        f = lambda text, **kw: queries.count_products(self.conn, queries.ProductFilter(**{"text": text, "in_merkmale": True, **kw}))
+        self.assertEqual(f("gewicht 4,5 KG"), 1)              # Satzzeichen/Groß-klein egal
+        self.assertEqual(f("4.5kg"), 1)                       # „4.5kg“ = „4,5 kg“
+        self.assertEqual(f("gewi"), 1)                        # Wortanfang genügt
+        self.assertEqual(f("10"), 0)                          # Zahl nur als ganzes Wort (kein Treffer in „100 VA“)
+        self.assertEqual(f("100"), 1)
+        self.assertEqual(f('"Leistung 100"'), 1)              # Phrase
+        self.assertEqual(f('"100 Leistung"'), 0)
+        self.assertEqual(f("pumpe -gewicht"), 2)              # Pumpe B und C, nicht A
+        self.assertEqual(f("01.24.01 pumpe"), 3)              # Nummernbereich + Wort (Pumpe A, B, C)
+        self.assertEqual(f("gewicht", in_merkmale=False), 0)  # Suchbereich Merkmale aus
+        self.assertEqual(f('"Leistung: 100 VA"'), 1)          # so sucht ein Klick auf eine Merkmal-Zeile
+        # Index wird beim Import aktualisiert
+        importer.import_file(self.conn, self.v2)
+        self.assertEqual(f("4,7 kg"), 1)
+        self.assertEqual(f("4,5 kg"), 0)
+        # Silbentrennung und Phrase-Erkennung
+        self.assertEqual(merkmale.normalize("hö-\nhenverstellbar PR70"), "höhenverstellbar PR 70")
+        self.assertEqual(merkmale.parse_query('"Typ 10" -netz 01.24').numbers, ["01.24"])
+        # Fundstelle trotz doppelter Leerzeichen im Originaltext (echter Fall aus der HMV)
+        self.assertEqual(merkmale.fundstelle("Bauform: HdO\nEnergiequelle:  Typ 312 (PR41)", ["energiequelle: typ 312 (PR 41)"]),
+                         "Energiequelle: Typ 312 (PR41)")
+
     def test_others_activity(self):
         importer.import_file(self.conn, self.v1)
         queries.add_comment(self.conn, "0124010001", "von Schulz", "Schulz")
@@ -270,6 +332,9 @@ class ImportTests(unittest.TestCase):
         store.set_mark(["0124010001", "0124010004"], cid)
         store.attach(self.conn)
         self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(text="lager")), 1)
+        # Feld „Merkmale/Notizen“: eine Zeile aus den Details findet das Produkt (auch ohne Merkmal-Häkchen)
+        self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(notiz_text="gewicht: 4,5 KG")), 1)
+        self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(notiz_text="lager süd")), 1)
         self.assertEqual(queries.count_products(self.conn, queries.ProductFilter(kategorie=cid)), 2)
         again = FavoriteStore(os.path.join(self.tmp, "favs"))
         self.assertEqual(again.categories[cid], {"name": "Projekt X", "farbe": "#123456"})
@@ -310,6 +375,8 @@ class ImportTests(unittest.TestCase):
         import subprocess
         import shutil
         build = os.path.join(ROOT, "tools", "build_single_file.py")
+        if not os.path.exists(build):
+            self.skipTest("Testordner ohne Build-Skript (Einzeldatei gibt es nur im Hauptprogramm)")
         subprocess.run([sys.executable, build], check=True, capture_output=True)
         single = os.path.join(self.tmp, "app")
         os.makedirs(single)

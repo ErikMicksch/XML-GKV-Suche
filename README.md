@@ -1,6 +1,6 @@
 # HMV-Viewer – Hilfsmittelverzeichnis (GKV-SV)
 
-Python-Projekt mit moderner GUI (Qt / PySide6, Farbwelt angelehnt an die AOK) zum Einsehen des Hilfsmittelverzeichnisses aus der `*_HMV.xml`,
+Python-Projekt mit moderner Oberfläche (Qt Quick/QML mit PySide6, Farbwelt angelehnt an die AOK) zum Einsehen des Hilfsmittelverzeichnisses aus der `*_HMV.xml`,
 mit **10-stelliger Hilfsmittelnummer**, **Versionshistorie** und **Excel-Export**.
 
 ## Start – eine Python-Datei, keine Admin-Rechte
@@ -23,19 +23,25 @@ Beim ersten Start fragt das Programm nach der XML. Die Datei `20260831_HMV.xml` 
 `hmv_viewer_app.py` wird aus dem Quellcode erzeugt (nicht von Hand bearbeiten):
 
 ```
-python tools/build_single_file.py   # nach Änderungen an hmv_viewer/*.py
+python tools/build_single_file.py   # nach Änderungen an hmv_viewer/ (auch ui/ und ui/qml/)
 ```
 
 Alternativ direkt aus dem Quellordner: `python -m hmv_viewer` bzw. `python run_hmv.py`.
+Die bisherige Oberfläche (Qt Widgets) startet weiterhin mit `--klassisch`, z. B. `python hmv_viewer_app.py --klassisch`.
+In der Einzeldatei werden die QML-Dateien beim ersten Start je Version nach `%LOCALAPPDATA%\HMV-Viewer\qml_<version>`
+entpackt (QML braucht echte Dateien; keine Adminrechte nötig).
 
 ## Als .exe weitergeben (ohne Installation, ohne Admin-Rechte)
 
-Auf einem Windows-Rechner mit Python: **`build_exe.bat` doppelklicken** → `dist\HMV-Viewer.exe`.
-Diese einzelne Datei (ca. 60–100 MB, enthält Qt) kann an Endnutzer weitergegeben werden (kein Python, keine Installation, keine Admin-Rechte):
+Auf einem Windows-Rechner mit Python: **`build_exe.bat` doppelklicken** → Programmordner `dist\HMV-Viewer\`
+(mit `HMV-Viewer.exe`, enthält Qt) und `dist\start_lokal.bat`. Weitergabe an Endnutzer ohne Python, ohne Installation,
+ohne Admin-Rechte:
 
 * Die Datenbank wird im Ordner `data` **neben der .exe** angelegt (portabel, z. B. auf einem Netzlaufwerk oder
   USB-Stick). Ist der Ordner nicht beschreibbar und gibt es dort noch keine Datenbank, wird `%LOCALAPPDATA%\HMV-Viewer` verwendet.
-* Beim Start entpackt sich die .exe kurz in den Temp-Ordner des Benutzers (erster Start ca. 3–10 s).
+* Ordner statt Einzeldatei: beim Start wird nichts entpackt. **`start_lokal.bat`** (neben den Ordnern `HMV-Viewer` und
+  `data`) kopiert nur Geändertes nach `%LOCALAPPDATA%\HMV-Viewer-Programm` und startet von dort – schneller Start,
+  die Datenbank bleibt auf dem Netzlaufwerk (`HMV_DB`).
 * Die .exe ist nicht signiert: Windows SmartScreen kann „Weitere Informationen → Trotzdem ausführen“ anzeigen,
   Virenscanner melden bei PyInstaller-Dateien gelegentlich Fehlalarme. Abhilfe: Code-Signing-Zertifikat
   oder Freigabe durch die IT.
@@ -44,7 +50,8 @@ Diese einzelne Datei (ca. 60–100 MB, enthält Qt) kann an Endnutzer weitergege
 
 ### Mehrere Benutzer gleichzeitig über ein Netzlaufwerk
 
-`HMV-Viewer.exe` einmal auf das Netzlaufwerk legen (z. B. `\\server\abteilung\HMV\`); alle starten **dieselbe .exe**.
+Den Ordner `HMV-Viewer` und `start_lokal.bat` einmal auf das Netzlaufwerk legen (z. B. `\\server\abteilung\HMV\`);
+alle starten **`start_lokal.bat`** (oder direkt `HMV-Viewer\HMV-Viewer.exe`).
 
 * **Keine Adminrechte nötig – nie.** Die .exe läuft mit normalen Benutzerrechten (kein `--uac-admin`, Manifest
   „asInvoker“). Geschrieben wird nur in den `data`-Ordner neben der .exe, in den eigenen Temp-Ordner,
@@ -53,7 +60,8 @@ Diese einzelne Datei (ca. 60–100 MB, enthält Qt) kann an Endnutzer weitergege
   Notizen, Benutzer). Sie läuft im Rollback-Journal-Modus (nicht WAL), der für Netzlaufwerke geeignet ist; ältere
   Datenbanken werden beim Start automatisch umgestellt. Getestet: 8 gleichzeitige Prozesse (Import + Schreiben + Lesen)
   über einen UNC-Pfad ohne Fehler, Integritätsprüfung ok.
-* **Jeder wählt seinen eigenen Benutzer** (Nachname) – gespeichert je Windows-Benutzer, wechselbar über den Namens-Button.
+* **Jeder hat seinen eigenen Benutzer** (Nachname) – einmalig beim ersten Start eingegeben und in der eigenen
+  Favoriten-Datei gespeichert; oben rechts wird er nur angezeigt (kein Wechsel).
   Persönliche Favoriten, private Listen, eigene Notizen und Kategorien liegen in der eigenen Favoriten-Datei.
 * Schreibt jemand gerade (z. B. ein Import), warten die anderen kurz; bei längerer Sperre erscheint ein Hinweis statt
   eines Fehlers. Neue Importe anderer werden beim Zurückkehren ins Fenster automatisch übernommen.
@@ -86,6 +94,7 @@ bisherigen verglichen, jede Abweichung wird dauerhaft gespeichert:
 | Geändert | Feld(er) geändert – alter und neuer Wert je Feld werden gespeichert |
 | Entfernt | Produkt fehlt in der neuen XML (bleibt als „entfernt“ im Bestand) |
 | Wieder aufgenommen | zuvor entferntes Produkt ist wieder enthalten |
+| Umgruppiert | Produkt hat eine neue 10-stellige Nummer (andere Gruppe/Untergruppe/Art bzw. anderer 7-Steller): die alte Nummer fällt weg, eine neue mit gleicher Bezeichnung und gleichem Hersteller kommt hinzu. Die Historie zeigt alte und neue Nummer. Platzhalter „Nicht besetzt“ zählen nie. Ältere Versionen werden beim ersten Start einmalig nachträglich ausgewertet. |
 
 Dasselbe gilt für Gruppen, Anwendungsorte, Untergruppen und Produktarten (Reiter *Versionen*).
 Der **erste Import ist die Ausgangsbasis** (alles „Neu“, aber nicht farbig markiert).
@@ -93,7 +102,7 @@ Der **erste Import ist die Ausgangsbasis** (alles „Neu“, aber nicht farbig m
 In der GUI:
 * **Produkte** (drei Spalten): links Produktgruppen mit Filterfeld (Name oder Nummer, z. B. „10.50“),
   Mitte Trefferliste, rechts Details, Historie (Diff alt/neu je Feld) und **Meine Notiz**.
-  Suche oben (Bezeichnung, Hersteller, Nummer, optional Merkmale), Filter *Status*, *Änderung in Version/Typ*
+  Suche oben (Bezeichnung, Hersteller, Nummer, Notizen und – standardmäßig an, abschaltbar – Merkmale), Filter *Status*, *Änderung in Version/Typ*
   und **Hersteller** (Teiltext genügt). Zeilen der letzten Version sind farbig markiert
   (grün = neu, gelb = geändert, blau = wieder aufgenommen, rot = entfernt). Tooltip auf der Bezeichnung zeigt die Merkmale.
 * **Versionen**: alle Importe mit Zählern; Auswahl zeigt die Änderungen der Version, Doppelklick springt zum Produkt.
@@ -106,15 +115,72 @@ In der GUI:
   **betroffene Favoriten sofort angezeigt**.
 * **Notizen und Kommentare**: „Meine Notiz“ (nur für Sie) und **Kommentare** je Produkt (Reiter „Kommentare“ im
   Detailbereich, in der Datenbank, für alle sichtbar, jeweils mit Name und Zeitpunkt; eigene Kommentare lassen sich
-  löschen). Beide erscheinen als Spalte, die große Suche findet beide, das Feld **„Notizen“** sucht nur darin.
+  löschen). Beide erscheinen als Spalte, die große Suche findet beide. Das Feld **„Merkmale/Notizen“** sucht nur in
+  Merkmalen, Notizen und Kommentaren – z. B. eine Zeile aus den Details wie „Energiequelle: Batterie vom Typ 10“.
   Gemeinsame Notizen aus v2.2 werden beim Start automatisch zu Kommentaren.
 * **Farbkategorien**: eigene Kategorien mit Farbe (Vorgaben: Erledigt, In Prüfung, Kritisch; verwalten über
   *Mehr ▾ → Farbkategorien*). Zuweisen per Rechtsklick → *Farbkategorie* (auch für viele Zeilen) oder im Detailbereich;
   in der Liste zeigt ein kleines Farbfeld die Kategorie, Filter *Kategorie* zeigt nur diese Produkte, sortierbar.
   Die Kategorien selbst liegen in der Favoriten-Datei; im Excel-Export als Spalte „Kategorie (persönlich)“.
   Das Einfärben ist für Kollegen unter „Änderungen anderer“ sichtbar.
-* **Design**: *Mehr ▾ → Design* – **Classic** (AOK-Grün), **Hell** (neutral, weiß) oder **Dunkel**; wird je Benutzer gemerkt.
+* **Design**: *Mehr ▾ → Design* – **AOK Modern** (Standard), **Classic** (AOK-Grün), **Hell** (neutral, weiß) oder
+  **Dunkel**; Schriftgröße und Zeilenhöhe unter *Mehr ▾ → Ansicht*; alles wird je Benutzer gemerkt.
 * Alle Tastenkürzel: *Mehr ▾ → Tastenkürzel*. Fenstergröße und Spaltenbreiten werden je Benutzer gemerkt.
+
+### Neu in v3.0 – Oberfläche mit Qt Quick/QML
+
+* **Neue Oberfläche** mit allen bisherigen Funktionen (Code: `hmv_viewer/ui/`, je Bereich ein Modul; Aussehen:
+  `hmv_viewer/ui/qml/`, je Seite/Dialog eine Datei). Daten, Suche, Import/Export und Favoriten-Datei unverändert.
+* **Lesbarkeit:** alle Farbpaare geprüft (Text ≥ 4,5 : 1, Fokusrahmen ≥ 3 : 1 – automatischer Test); gelber Hilfe-Knopf
+  mit dunkler Schrift; deutlicher Fokusrahmen bei Tab-Bedienung; Symbol-Knöpfe mit Tooltip und Namen für Bildschirmleser.
+* **Einfacher:** „Mehr Filter“ (Status, Version, Änderungsart, Hersteller, Farbkategorie, „Nicht besetzt“ – mit Anzahl
+  aktiver Filter); Kopf aufgeräumt (*Daten ▾*, *Menü*; Import nur mit Schreibrecht); leere Listen mit Knopf für den
+  nächsten Schritt; Einrichtung beim ersten Start als eigene Seite; alle Einstellungen in einem Dialog; Farbfelder.
+* **Schmale Bildschirme:** unter 1700 px Produktgruppen als Leiste von links, unter 1500 px Kopf-Knöpfe nur mit Symbol,
+  unter 1300 px Navigation nur mit Symbol; Mindestbreite 1024 px.
+* **Modern:** eigene SVG-Symbole, weiche Schatten, Übergänge, neue Farbwelt **AOK Modern Dunkel**.
+* **Schneller Start vom Netzlaufwerk:** Programmordner statt Einzeldatei + `start_lokal.bat` (siehe oben).
+* **Tests:** `tests/test_qml.py` – Kontrast aller Farbwelten, kompletter Ablauf (jede QML-Warnung = Fehler) und
+  Bildvergleich gegen `tests/baseline_qml` (neu erzeugen: Ordner löschen).
+* Grenzen: Breiten von Baum | Liste | Details werden nicht gespeichert; Ziehen auf Listen nur von Hand geprüft.
+
+### Neu in v2.6
+
+* **Neue Standard-Oberfläche „AOK Modern“** – auch ohne PC-Erfahrung bedienbar: große Schrift (12 pt), große
+  Schaltflächen, Häkchen und Bildlaufleisten, AOK-Grün mit Verlauf im Kopf, abgerundete Karten mit weichem Schatten.
+* **Navigation in Klartext**: Startseite · Produkte suchen · Versionen · Änderungen anderer.
+* **Hilfe zu jeder Seite**: gelber Knopf *Hilfe* oben, *Hilfe zu dieser Seite* links unten oder **F1** – erklärt
+  Schritt für Schritt in einfachen Worten, was man auf der aktuellen Seite tun kann.
+* *Schnellzugriff* statt „Strg+K“, Suchfeld mit Beispiel („Hier suchen, z. B. Rollator“).
+* Beim ersten Start von v2.6 wird einmalig auf „AOK Modern“, 12 pt und Zeilenhöhe „Groß“ umgestellt; die alte
+  Darstellung gibt es weiter unter *Mehr ▾ → Design → Classic* und *Mehr ▾ → Ansicht*. Mindestbreite bei 12 pt
+  ca. 1480 Pixel (passt auch auf 1920er-Bildschirme mit 125 % Skalierung).
+* Das Diagramm auf der Startseite passt Beschriftung und Abstände an die Schriftgröße an.
+
+### Neu in v2.5
+
+* **Schnelle Suche mit Volltext-Index** (10–90 ms statt bis zu 1 s bei 66.024 Produkten). **Ein Suchfeld** oben mit
+  Schaltern *Suchen in: Bezeichnung / Hersteller · Merkmale · Notizen & Kommentare* (je Benutzer gemerkt).
+  Wortanfang genügt (`batt` → Batterie), Zahlen nur als ganzes Wort (`10` ≠ `100`), `"Typ 10"` = genaue Wortfolge,
+  `-netzabhängig` = ausschließen, `01.24.01` = Nummernbereich. Vereinheitlicht: `PR 70` = `PR70`, `4,7 kg` = `4.7kg`,
+  Silbentrennung und doppelte Leerzeichen im Originaltext werden ignoriert. Teilwörter in der Wortmitte (`ollator`)
+  findet die Suche nicht.
+* **Merkmal-Zeile anklicken** (Details): übernimmt „Eigenschaft: Wert“ als genaue Phrase ins Suchfeld.
+* **Spalte „Fundstelle (Merkmale)“** mit der passenden Merkmal-Zeile; die Details springen zu den markierten Treffern.
+* **Spalten frei einstellen**: alle Spalten (auch „Bezeichnung“) mit der Maus breiter/schmaler ziehen, Doppelklick auf
+  den Rand = passende Breite, Reihenfolge per Ziehen; **„Spalten …“** (Button über der Liste, *Mehr ▾ → Ansicht* oder
+  Rechtsklick auf den Tabellenkopf) blendet Spalten ein/aus. Alles wird je Benutzer gemerkt.
+* Der Index wird beim ersten Start einmalig aufgebaut (einige Sekunden) und bei jedem Import aktualisiert; die
+  Datenbank wird dadurch ca. 27 MB größer.
+
+### Neu in v2.4
+
+* **Umgruppiert** als eigene Änderungsart (Filter, Farbe, Spalte unter *Versionen*, Excel, Diagramm).
+* **„Geändert – Merkmale“** in der Auswahl der Änderungstypen: nur Produkte, bei denen sich die Merkmale geändert haben
+  (reine Bezeichnungs-/Datumsänderungen erscheinen dort nicht).
+* **„Nicht besetzt“ ausblenden**: Schalter in der Filterleiste, je Benutzer gemerkt.
+* **Markierung der Suchtreffer** in den Merkmalen der Details (Feld „Merkmale/Notizen“ und – bei Merkmal-Suche –
+  die große Suche). Farbe: *Mehr ▾ → Ansicht → Markierungsfarbe für Suchtreffer*, standardmäßig gelb, je PC gespeichert.
 
 ### Neu in v2.3
 
@@ -176,10 +242,11 @@ Produkts zeigen, in welchen gemeinsamen und eigenen Listen es steht. Excel-Expor
 
 ### Benutzer
 
-Beim ersten Start wählt jeder seinen **Nachnamen** aus oder legt ihn neu an (kein Passwort). Wechseln/anlegen über den
-Namens-Button oben rechts. Der Name wird bei gemeinsamen Listen und gemeinsamen Notizen als „zuletzt geändert von
-… am …“ angezeigt (Tooltip der Liste, Statusleiste, unter der gemeinsamen Notiz, Excel-Export). Es ist keine
-Zugriffskontrolle – jeder kann jeden Namen wählen.
+Beim ersten Start gibt jeder seinen **Nachnamen** ein (kein Passwort). Der Name wird in der **eigenen
+Favoriten-Datei** (`HMV_Favoriten.json`, Feld `benutzer`) gespeichert und oben rechts nur angezeigt – ein Wechsel im
+Programm ist nicht vorgesehen. Er erscheint bei gemeinsamen Listen und Kommentaren als „zuletzt geändert von … am …“
+und unter „Änderungen anderer“. Wer den Speicherort der Favoriten wechselt, übernimmt den Namen der dortigen Datei
+(oder trägt seinen bisherigen ein). Es ist keine Zugriffskontrolle – der Name lässt sich in der Datei ändern.
 
 ### Datenbank sichern und im Notfall wiederherstellen
 
@@ -233,7 +300,10 @@ hmv_viewer/launcher.py   gemeinsamer Start (Fehlerdialog)
 hmv_viewer/favorites.py  persönliche Favoriten & Notizen (JSON-Datei je Benutzer)
 tools/build_single_file.py  erzeugt hmv_viewer_app.py
 hmv_viewer_app.py        fertige Einzeldatei
-hmv_viewer/gui.py        Qt-Oberfläche (PySide6)
+hmv_viewer/ui/            Oberfläche (Qt Quick/QML): core, tree, products, detail, lists, pages, dialogs,
+                         maint, theme, icons, app – QML-Dateien in hmv_viewer/ui/qml/
+hmv_viewer/gui.py        bisherige Oberfläche (Qt Widgets, --klassisch) und gemeinsame Hilfsfunktionen
 hmv_viewer/ui_extras.py  Icons, Startseite, Karten, Schnellzugriff, Dialoge
+hmv_viewer/merkmale.py   Suche: Volltext-Index, Vereinheitlichung, Suchsyntax, Merkmal-Zerlegung
 tests/                   python -m unittest discover -s tests
 ```

@@ -15,7 +15,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 try:
-    from PySide6.QtCore import QSettings
+    from PySide6.QtCore import QSettings, QTimer
     from PySide6.QtWidgets import QApplication, QMessageBox
 except ImportError:  # PySide6 fehlt -> Test überspringen
     QApplication = None
@@ -68,6 +68,51 @@ class GuiSmoke(unittest.TestCase):
         self.assertEqual(win.filter.import_id, 2)
         self.assertTrue(win.filter.favoriten)
         self.assertIn("Ihrer Favoriten", calls[-1])
+        # Details auch bei gewähltem Versionsfilter (früher Absturz: shown_type fehlte)
+        win.table.selectRow(0)
+        self.assertTrue(win.sec_info.body.text())
+        self.assertTrue(win.detail_chips.count())
+        # Merkmal-Suche ist standardmäßig an und bleibt beim Zurücksetzen an
+        self.assertTrue(win.chk_merk.isChecked())
+        # Fundstellen in den Merkmalen werden markiert (Standard gelb), Farbe je Benutzer
+        self.assertEqual(gui.highlight_html("Gewicht: 4,7 kg\nA<b>",["gewicht", "4,7", "<b"], "#FFEB3B"),
+                         "<span style='background:#FFEB3B; color:#000000'>Gewicht</span>: "
+                         "<span style='background:#FFEB3B; color:#000000'>4,7</span> kg<br>"
+                         "A<span style='background:#FFEB3B; color:#000000'>&lt;b</span>&gt;")
+        win.search.setText("gewicht")
+        win.apply_filter()
+        win.table.selectRow(0)
+        self.assertIn("background:#FFEB3B", win.sec_merk.body.text())
+        self.assertTrue(win.table.item(0, gui.COL["fund"]).text().startswith("Gewicht"))   # Fundstelle in der Liste
+        # Merkmal-Zeile anklicken -> genaue Phrase im (einzigen) Suchfeld, Suche in Merkmalen
+        self.assertEqual(win._merk_links[0][0], "Gewicht")
+        win.chk_merk.setChecked(False)
+        win._on_detail_link("merkmal:0")
+        self.assertEqual(win.search.text(), '"Gewicht: 4,7 kg"')
+        self.assertTrue(win.chk_merk.isChecked())
+        self.assertEqual(len(win.row_nummer), 1)
+        self.assertFalse(hasattr(win, "cb_prop"))                    # keine Eigenschaft/Wert-Auswahl mehr
+        win.search.setText("gewicht")
+        win.apply_filter()
+        win.table.selectRow(0)
+        settings.setValue("markierfarbe", "#00FF00")
+        win._show_detail(win.current_nummer)
+        self.assertIn("background:#00FF00", win.sec_merk.body.text())
+        win.search.clear()
+        # Suchbereiche: nur Bezeichnung -> Merkmal-Wort findet nichts
+        win.chk_merk.setChecked(False)
+        win.search.setText("gewicht")
+        win.apply_filter()
+        self.assertEqual(win.total, 0)
+        win.chk_merk.setChecked(True)
+        self.assertGreater(win.total, 0)
+        win.search.clear()
+        # „Nicht besetzt“ ausblenden (bleibt gemerkt)
+        win.reset_filter()
+        n_all = win.total
+        win.chk_platzhalter.setChecked(True)
+        self.assertEqual(win.total, n_all - 1)
+        win.chk_platzhalter.setChecked(False)
 
         # Ganze Gruppe als Favorit: alle Produkte der Gruppe gehören dazu, Gruppe erscheint als Baum
         win.reset_filter()
@@ -154,21 +199,29 @@ class GuiSmoke(unittest.TestCase):
         self.assertEqual(win.row_nummer, [fav])
 
         # Kommentar für alle: in der DB mit Benutzer, von Suche und Notiz-Suchfeld gefunden
-        self.assertEqual(settings.value("benutzer"), "Meier")
+        self.assertEqual(win.store.user_name, "Meier")                       # Name steht in der Favoriten-Datei
+        with open(os.path.join(fav_dir, FILE_NAME), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["benutzer"], "Meier")
+        self.assertIsNone(win.user_btn.menu())                                # kein Wechsel über den Kopf
         win.table.selectRow(0)
         win._send_comment("Rückruf Hersteller 2027")
         row = queries.comments_for(win.conn, fav)[-1]
         self.assertEqual((row["text"], row["user"]), ("Rückruf Hersteller 2027", "Meier"))
         self.assertEqual(win.detail_tabs.tabText(1), "Kommentare (1)")
         win.reset_filter()
-        win.note_search.setText("rückruf")
+        win.scope_bez.setChecked(False)
+        win.chk_merk.setChecked(False)                # nur „Notizen & Kommentare“
+        win.search.setText("rückruf")
         win.apply_filter()
         self.assertEqual(win.row_nummer, [fav])
         self.assertIn("Rückruf Hersteller 2027", win.table.item(0, gui.COL["gnotiz"]).text())
-        win.note_search.setText("hinweis bis")       # eigene Notiz über das Notiz-Feld
+        win.search.setText("hinweis bis")             # eigene Notiz
         win.apply_filter()
         self.assertEqual(win.row_nummer, [fav])
+        win.scope_bez.setChecked(True)
+        win.chk_merk.setChecked(True)
         win.reset_filter()
+        self.assertTrue(win.chk_merk.isChecked())
         win.search.setText("rückruf")                 # große Suche findet Kommentare auch
         win.apply_filter()
         self.assertEqual(win.row_nummer, [fav])
@@ -252,12 +305,36 @@ class GuiSmoke(unittest.TestCase):
         hdr.setSectionHidden(gui.COL["hersteller"], True)
         win._reset_columns()
         self.assertFalse(hdr.isSectionHidden(gui.COL["hersteller"]))
+        # alle Spalten frei in der Breite ziehbar – auch „Bezeichnung“
+        from PySide6.QtWidgets import QHeaderView
+        self.assertTrue(all(hdr.sectionResizeMode(i) == QHeaderView.ResizeMode.Interactive
+                            for i in range(len(gui.PRODUCT_COLUMNS))))
+        win.table.setColumnWidth(gui.COL["bezeichnung"], 555)
+        self.assertEqual(win.table.columnWidth(gui.COL["bezeichnung"]), 555)
+        # Spalten-Dialog: Häkchen blendet sofort aus/ein, Pflichtspalten sind gesperrt
+        dlg = win._columns_dialog()
+        dlg.checks["fund"].setChecked(False)
+        self.assertTrue(hdr.isSectionHidden(gui.COL["fund"]))
+        self.assertFalse(dlg.checks["nummer"].isEnabled())
+        dlg.checks["fund"].setChecked(True)
+        self.assertFalse(hdr.isSectionHidden(gui.COL["fund"]))
+        dlg.close()
         # Startseite, Ansicht, Tagessicherung, Info, Abo, Was ist neu
         win._goto_page_widget(2)
         self.assertIn(win.user, win.greeting.text())
         win.set_view(density="Kompakt", font_pt=11)
-        self.assertEqual(gui.ROW_H, 24)
-        win.set_view(density="Normal", font_pt=10)
+        self.assertEqual(gui.ROW_H, gui.DENSITY["Kompakt"])
+        win.set_view(density="Groß", font_pt=12)
+        # Standard „AOK Modern“: Klartext-Navigation und Hilfe (F1) zu jeder Seite
+        win.set_theme(gui.DEFAULT_THEME)
+        self.assertIn("qlineargradient", QApplication.instance().styleSheet())
+        self.assertEqual([win.nav_group.button(i).text().split(" (")[0] for i, *_ in gui.NAV],
+                         ["Startseite", "Produkte suchen", "Versionen", "Änderungen anderer"])
+        for page in (0, 1, 2):   # Seite 3 erst unten (Öffnen setzt „gesehen“)
+            win._goto_page_widget(page)
+            QTimer.singleShot(50, lambda: QApplication.activeModalWidget().accept())
+            win.show_help()
+        win._goto_page_widget(2)
         backup = win._auto_backup(sync=True)
         self.assertTrue(backup.exists())
         self.assertIsNone(win._auto_backup(sync=True))         # nur einmal pro Tag
@@ -328,7 +405,9 @@ class GuiSmoke(unittest.TestCase):
         texts = [win.act_table.item(r, 5).text() for r in range(win.act_table.rowCount())]
         self.assertIn("Kollegen-Kommentar", texts)
         self.assertIn("eingefärbt: Kritisch", texts)
-        self.assertEqual(win.nav_group.button(3).text(), "Änderungen\nanderer")   # gesehen -> Zähler weg
+        self.assertEqual(win.nav_group.button(3).text(), "Änderungen anderer")   # gesehen -> Zähler weg
+        QTimer.singleShot(50, lambda: QApplication.activeModalWidget().accept())
+        win.show_help()
         win.act_kind.setCurrentIndex(win.act_kind.findData("kategorie"))
         win.refresh_activity()
         self.assertTrue(all(win.act_table.item(r, 2).text() == "Farbkategorie" for r in range(win.act_table.rowCount())))
@@ -346,6 +425,8 @@ class GuiSmoke(unittest.TestCase):
         # Neuer Start liest die Favoriten aus der Datei
         win2 = gui.MainWindow(os.path.join(tmp, "t.db"), fav_dir=fav_dir, settings=settings)
         self.assertIn(fav, win2.store.favs)
+        self.assertEqual(win2.user, win.user)                               # Name kommt aus der Datei, keine Abfrage
+        self.assertTrue(win2.chk_merk.isChecked())
         win2.close()
 
     def test_activity_only_own_entries(self):

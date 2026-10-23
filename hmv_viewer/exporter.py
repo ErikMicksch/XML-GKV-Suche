@@ -101,8 +101,9 @@ def export_excel(conn, path, f: ProductFilter, *, include_history: bool = True,
                 conds.append("h.import_id=?")
                 params.append(f.import_id)
             if f.change_type:
-                conds.append("h.change_type=?")
-                params.append(f.change_type)
+                cond, extra = queries._type_cond("h", f.change_type)
+                conds.append(cond)
+                params += extra
             if not include_initial_in_history and first_id is not None:
                 conds.append("NOT (h.import_id=? AND h.change_type='NEU')")
                 params.append(first_id)
@@ -125,12 +126,12 @@ def export_excel(conn, path, f: ProductFilter, *, include_history: bool = True,
             wv = wb.add_sheet(
                 "Versionen",
                 header=["Version", "Import am", "Quelle", "Stand-Datum", "logische Version", "Produkte gesamt", "Neu",
-                        "Geändert", "Entfernt", "Wieder aufgenommen", "Unverändert", "Änderungen Stammdaten"],
-                widths=[10, 20, 52, 14, 16, 16, 10, 10, 10, 18, 14, 22])
+                        "Geändert", "Entfernt", "Wieder aufgenommen", "Umgruppiert", "Unverändert", "Änderungen Stammdaten"],
+                widths=[10, 20, 52, 14, 16, 16, 10, 10, 10, 18, 12, 14, 22])
             for v in sorted(queries.list_versions(conn), key=lambda r: r["id"]):
                 wv.append([v["id"], v["imported_at"].replace("T", " "), v["source_name"], _date(v["source_date"]),
                            v["logische_version"], v["n_total"], v["n_new"], v["n_changed"], v["n_removed"],
-                           v["n_reactivated"], v["n_unchanged"], v["n_stamm_changes"]])
+                           v["n_reactivated"], v["n_regrouped"], v["n_unchanged"], v["n_stamm_changes"]])
 
     progress("Fertig", total, total)
     return {"products": n, "history_rows": n_hist}
