@@ -36,7 +36,7 @@ class GuiSmoke(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         fav_dir = os.path.join(tmp, "favs")
         settings = QSettings(os.path.join(tmp, "s.ini"), QSettings.Format.IniFormat)
-        win = gui.MainWindow(os.path.join(tmp, "t.db"), fav_dir=fav_dir, settings=settings, user="Meier")
+        win = gui.MainWindow(os.path.join(tmp, "t.db"), fav_dir=fav_dir, settings=settings, user="Meier", auto_backup=False)   # sonst kommt die Tagessicherung auf langsamen PCs dem Test zuvor
 
         def wait_import(path):
             n = len(calls)
@@ -423,7 +423,7 @@ class GuiSmoke(unittest.TestCase):
         win.close()
 
         # Neuer Start liest die Favoriten aus der Datei
-        win2 = gui.MainWindow(os.path.join(tmp, "t.db"), fav_dir=fav_dir, settings=settings)
+        win2 = gui.MainWindow(os.path.join(tmp, "t.db"), fav_dir=fav_dir, settings=settings, auto_backup=False)
         self.assertIn(fav, win2.store.favs)
         self.assertEqual(win2.user, win.user)                               # Name kommt aus der Datei, keine Abfrage
         self.assertTrue(win2.chk_merk.isChecked())
